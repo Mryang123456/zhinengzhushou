@@ -104,6 +104,12 @@ python -m uvicorn backend.app.api.server:app --port 8000
 
 只添加你信任的服务：stdio MCP 服务以本机进程运行。临时禁用所有 MCP 服务可使用 `python -m backend.main --no-mcp`。
 
+### MCP 治理
+
+`backend/config/mcp.json` 除服务配置外还包含治理信息：允许服务、工具风险级别、超时和重试。L0/L1 工具可以自动执行；未登记、私有读取或写入类工具默认 L2，后端会阻断并返回“需要用户确认”。每次 MCP 调用都会写入 `data/mcp_audit.jsonl`，参数仅记录哈希；输出会限制大小并过滤常见提示词注入语句。
+
+当前本地版本实现了审批前阻断；正式生产环境还应把 L2-L4 接入前端审批页和 LangGraph interrupt/checkpoint 恢复，并在容器或沙箱中运行 stdio MCP 服务。
+
 ## Skill 技能系统
 
 项目内 Skill 位于 `backend/skills/<技能名称>/SKILL.md`。每个文件都包含名称、用途、触发词、允许工具和工作准则。启动时后端只加载这个受控目录中的 Skill；每个用户问题会按触发词匹配最多两个技能，并将其准则注入当前 Agent 回合。

@@ -1,4 +1,13 @@
 {
+  "mcpGovernance": {
+    "allowedServers": ["weather", "search"],
+    "toolRisk": {
+      "weather_": "L1",
+      "search_": "L1"
+    },
+    "timeoutSeconds": 15,
+    "retries": 1
+  },
   "mcpServers": {
     "weather": {
       "command": "python",

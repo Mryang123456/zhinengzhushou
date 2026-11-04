@@ -24,6 +24,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from backend.app.config import ENV_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE, SKILLS_DIR
+from backend.app.mcp.governance import invoke_governed, load_governance, risk_for_tool
 from backend.app.memory.store import MemoryStore, create_memory_store
 from backend.app.models.factory import ModelConfigurationError, create_chat_model, ensure_model_ready, get_model_settings
 from backend.app.skills.registry import Skill, format_skill_context, load_skills, match_skills, select_tool_names
@@ -283,6 +284,8 @@ async def build_agent(
 ):
     """构建同时包含本地工具和已发现 MCP 工具的工作流。"""
     tools = TOOLS.copy()
+    mcp_tool_names: set[str] = set()
+    governance = load_governance(MCP_CONFIG_FILE)
     skills = load_skills(SKILLS_DIR)
     tools.extend(create_skill_tools(skills))
     tools.extend(create_knowledge_tools(os.getenv("KNOWLEDGE_DATABASE_URL")))
@@ -295,7 +298,9 @@ async def build_agent(
         client = MultiServerMCPClient(
             load_mcp_connections(mcp_config_path), tool_name_prefix=True
         )
-        tools.extend(await client.get_tools())
+        discovered = await client.get_tools()
+        tools.extend(discovered)
+        mcp_tool_names = {tool.name for tool in discovered}
 
     model = create_chat_model()
     tool_by_name = {item.name: item for item in tools}
@@ -359,6 +364,14 @@ async def build_agent(
         blocked = [call for call in calls if call["name"] not in set(state.get("allowed_tool_names", []))]
         if blocked:
             return {"messages": [ToolMessage(content="该工具不在当前 Skill 的允许范围内，请改用已授权工具或向用户追问。", tool_call_id=call["id"], name=call["name"]) for call in blocked]}
+        mcp_calls = [call for call in calls if call["name"] in mcp_tool_names]
+        if mcp_calls:
+            results = []
+            for call in mcp_calls:
+                tool = tool_by_name[call["name"]]
+                content = await invoke_governed(tool, call["args"], risk_for_tool(call["name"], governance), user_id, "runtime", governance.get("timeoutSeconds", 15), governance.get("retries", 1))
+                results.append(ToolMessage(content=content, tool_call_id=call["id"], name=call["name"]))
+            return {"messages": results}
         return await tool_node.ainvoke(state)
 
     def quality_gate(state: AgentState):
