@@ -121,6 +121,25 @@ Skill 匹配后，模型只会看到该 Skill 声明的工具及基础低风险�
 
 每个请求先经过 `backend/app/intent/policy.py`：未识别、多个同分意图或出行缺少地点时，工作流直接返回澄清问题，不调用模型和工具。仅当规则判定通过，才进入 Agent 并生成本回合工具白名单。意图决策会作为 SSE `intent` 事件输出，便于前端和日志系统审计。
 
+## 知识库与 pgvector
+
+知识库使用 PostgreSQL + pgvector，表结构位于 `backend/db/knowledge.sql`，Docker 初始化时也会创建对应表和向量索引。配置 `.env.local`：
+
+```text
+KNOWLEDGE_DATABASE_URL=postgresql://agent:你的密码@localhost:5432/agent_memory
+# 可选：只有设置后才调用付费 Embedding；未设置时使用关键词检索回退。
+KNOWLEDGE_EMBEDDING_PROVIDER=openai
+KNOWLEDGE_EMBEDDING_MODEL=text-embedding-3-small
+```
+
+基础版支持导入 UTF-8 的 `.txt`、`.md`、`.json` 文件：
+
+```powershell
+python -m backend.app.knowledge.cli .\资料\产品说明.md
+```
+
+导入时会切分文本、记录来源并按配置生成向量。Agent 仅在配置知识库地址后暴露 `search_knowledge_base` 工具，且该工具归属于“联网调研”Skill 的白名单；检索结果始终返回文档来源与片段编号。
+
 ## 服务端基础防护
 
 启动服务：

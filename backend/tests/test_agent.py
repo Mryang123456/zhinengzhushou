@@ -13,6 +13,8 @@ from backend.app.config import SKILLS_DIR
 from backend.app.skills.registry import load_skills, match_skills, select_tool_names
 from backend.app.intent.policy import classify
 from backend.app.quality.validator import validate_answer
+from backend.app.knowledge.chunking import split_text
+from backend.app.knowledge.rerank import rerank
 
 
 class CalculatorTests(unittest.TestCase):
@@ -102,6 +104,14 @@ class CalculatorTests(unittest.TestCase):
         self.assertFalse(validate_answer("今天北京天气", "晴朗", [])["ok"])
         self.assertFalse(validate_answer("应该买哪只股票", "买入 A", [])["ok"])
         self.assertTrue(validate_answer("解释 Python 列表", "列表是有序集合。", [])["ok"])
+
+    def test_knowledge_chunking_preserves_overlap(self):
+        chunks = split_text("a" * 20, chunk_size=10, overlap=2)
+        self.assertEqual(chunks, ["a" * 10, "a" * 10, "a" * 4])
+
+    def test_reranker_prefers_lexical_evidence(self):
+        rows = [{"content": "天气预报", "score": 0.4}, {"content": "旅行路线", "score": 0.4}]
+        self.assertEqual(rerank("天气", rows)[0]["content"], "天气预报")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ from backend.app.models.factory import ModelConfigurationError, create_chat_mode
 from backend.app.skills.registry import Skill, format_skill_context, load_skills, match_skills, select_tool_names
 from backend.app.intent.policy import classify
 from backend.app.quality.validator import validate_answer
+from backend.app.knowledge.store import KnowledgeStore
 
 load_dotenv(ENV_FILE)
 
@@ -219,6 +220,23 @@ def create_skill_tools(skills: list[Skill]):
     return [list_skills]
 
 
+def create_knowledge_tools(database_url: str | None):
+    """仅在显式配置知识库数据库时暴露检索工具。"""
+    if not database_url:
+        return []
+    store = KnowledgeStore(database_url)
+
+    @tool
+    def search_knowledge_base(query: str) -> str:
+        """检索已导入的内部知识库，返回文本片段及其文档来源。"""
+        rows = store.search(query)
+        if not rows:
+            return "知识库中未找到相关资料。"
+        return "\n\n".join(f"来源：{row['source']}（片段 {row['chunk']}，相关度 {row['score']:.2f}）\n{row['content']}" for row in rows)
+
+    return [search_knowledge_base]
+
+
 def load_mcp_connections(config_path: Path) -> dict:
     """加载显式 MCP 服务配置；绝不从聊天输入中接受服务启动命令。"""
     try:
@@ -267,6 +285,7 @@ async def build_agent(
     tools = TOOLS.copy()
     skills = load_skills(SKILLS_DIR)
     tools.extend(create_skill_tools(skills))
+    tools.extend(create_knowledge_tools(os.getenv("KNOWLEDGE_DATABASE_URL")))
     memory_store = create_memory_store(memory_database_url, memory_db_path)
     if memory_store:
         tools.extend(create_memory_tools(memory_store, user_id))
