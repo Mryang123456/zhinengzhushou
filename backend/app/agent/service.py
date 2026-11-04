@@ -22,10 +22,11 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from memory import MemoryStore, create_memory_store
-from models import ModelConfigurationError, create_chat_model, ensure_model_ready, get_model_settings
+from backend.app.config import ENV_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE
+from backend.app.memory.store import MemoryStore, create_memory_store
+from backend.app.models.factory import ModelConfigurationError, create_chat_model, ensure_model_ready, get_model_settings
 
-load_dotenv(Path(__file__).with_name(".env.local"))
+load_dotenv(ENV_FILE)
 
 SYSTEM_PROMPT = """你是一名简洁、可靠的中文助手。
 你可以在任意回合调用工具，也可以在回复前连续调用多个工具。
@@ -238,7 +239,7 @@ async def checkpoint_scope(database_url: str | None = None):
 async def build_agent(
     mcp_config_path: Path | None = None,
     user_id: str = "default",
-    memory_db_path: Path | None = Path(__file__).with_name("data").joinpath("memory.db"),
+    memory_db_path: Path | None = MEMORY_DB_FILE,
     memory_database_url: str | None = None,
     checkpointer=None,
 ):
@@ -409,7 +410,7 @@ def main() -> None:
     parser.add_argument("--thread-id", default="demo", help="对话检查点标识")
     parser.add_argument(
         "--mcp-config",
-        default=str(Path(__file__).with_name("mcp.json")),
+        default=str(MCP_CONFIG_FILE),
         help="显式 MCP 服务配置文件的路径",
     )
     parser.add_argument("--no-mcp", action="store_true", help="仅启用内置工具")
@@ -417,7 +418,7 @@ def main() -> None:
     parser.add_argument("--user-id", default="default", help="长期记忆所属用户标识")
     parser.add_argument(
         "--memory-db",
-        default=str(Path(__file__).with_name("data").joinpath("memory.db")),
+        default=str(MEMORY_DB_FILE),
         help="SQLite 长期记忆数据库路径",
     )
     parser.add_argument("--no-memory", action="store_true", help="关闭长期记忆功能")

@@ -2,7 +2,7 @@
   "mcpServers": {
     "weather": {
       "command": "python",
-      "args": ["weather_mcp_server.py"],
+      "args": ["-m", "backend.app.mcp.weather_server"],
       "transport": "stdio"
     },
     "search": {

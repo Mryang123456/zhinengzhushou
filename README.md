@@ -6,7 +6,7 @@
 
 - 使用 GPT 回答问题；
 - 可在任意回合按需连续调用：受限的 `calculator`、`get_weather`（城市当前天气）和 `web_search`（联网检索）；
-- 默认还会作为 MCP 客户端连接 `mcp.json` 中配置的服务：本地 `weather_mcp_server.py` 与 DDGS 搜索服务；其工具会以 `weather_`、`search_` 前缀加入同一个 LangGraph `ToolNode`；
+- 默认还会作为 MCP 客户端连接 `backend/config/mcp.json` 中配置的服务：本地天气 MCP 与 DDGS 搜索服务；其工具会以 `weather_`、`search_` 前缀加入同一个 LangGraph `ToolNode`；
 - 联网工具只读取公开信息，不具备文件、Shell 或网络写入权限；
 - 使用同一个 `--thread-id` 时保留对话检查点；配置 PostgreSQL 后可跨进程、跨重启恢复；
 - 提供按 `user_id` 隔离的 SQLite 长期记忆；只有用户明确要求“记住”时才保存，支持检索与删除；
@@ -19,14 +19,14 @@
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python agent.py --once "计算 (17 + 3) * 2"
+python -m pip install -r backend/requirements.txt
+python -m backend.main --once "计算 (17 + 3) * 2"
 ```
 
 连续对话：
 
 ```powershell
-python agent.py --thread-id demo-01
+python -m backend.main --thread-id demo-01
 ```
 
 输入 `/quit` 退出。
@@ -44,14 +44,14 @@ python agent.py --thread-id demo-01
 不同用户使用不同的 `--user-id`，例如：
 
 ```powershell
-python agent.py --user-id 张三
+python -m backend.main --user-id 张三
 ```
 
 长期记忆默认不会保存 API Key、密码等敏感值；可用 `--no-memory` 临时关闭。
 
 ### PostgreSQL + pgvector
 
-生产环境推荐 PostgreSQL + pgvector。`docker-compose.yml` 和 `db/init.sql` 已准备好数据库、用户隔离索引与 `embedding vector(1536)` 列。
+生产环境推荐 PostgreSQL + pgvector。`docker-compose.yml` 和 `backend/db/init.sql` 已准备好数据库、用户隔离索引与 `embedding vector(1536)` 列。
 
 在 `.env.local` 配置非示例密码和数据库地址后启动：
 
@@ -63,7 +63,7 @@ CHECKPOINT_DATABASE_URL=postgresql://agent:与上方相同的强密码@localhost
 
 ```powershell
 docker compose up -d
-python agent.py --user-id 张三
+python -m backend.main --user-id 张三
 ```
 
 当 `MEMORY_DATABASE_URL` 存在时，Agent 自动优先使用 PostgreSQL；当 `CHECKPOINT_DATABASE_URL` 存在时，LangGraph 自动创建自己的 checkpoint 表并持久化每一步状态。未配置时分别回退为 SQLite 长期记忆与进程内检查点，便于本地开发。检查点键由 `user_id:thread_id` 构成，避免不同用户复用同名线程时串话。数据库容器尚未在当前电脑启动，因为未检测到 Docker。
@@ -73,7 +73,7 @@ python agent.py --user-id 张三
 启动本地服务：
 
 ```powershell
-uvicorn server:app --port 8000
+python -m uvicorn backend.app.api.server:app --port 8000
 ```
 
 随后向 `POST http://127.0.0.1:8000/chat/stream` 发送 JSON：
@@ -86,7 +86,7 @@ uvicorn server:app --port 8000
 
 ## MCP 配置
 
-`mcp.json` 是唯一允许启动 MCP 服务的显式配置。默认提供两个 stdio 服务：天气和 DDGS 搜索。智能体启动时发现 MCP 工具，之后模型可以和本地工具一样按需多次调用它们。
+`backend/config/mcp.json` 是唯一允许启动 MCP 服务的显式配置。默认提供两个 stdio 服务：天气和 DDGS 搜索。智能体启动时发现 MCP 工具，之后模型可以和本地工具一样按需多次调用它们。
 
 增加一个 MCP 服务时，手动编辑该文件，例如：
 
@@ -102,14 +102,14 @@ uvicorn server:app --port 8000
 }
 ```
 
-只添加你信任的服务：stdio MCP 服务以本机进程运行。临时禁用所有 MCP 服务可使用 `python agent.py --no-mcp`。
+只添加你信任的服务：stdio MCP 服务以本机进程运行。临时禁用所有 MCP 服务可使用 `python -m backend.main --no-mcp`。
 
 ## 服务端基础防护
 
 启动服务：
 
 ```powershell
-python -m uvicorn server:app --host 127.0.0.1 --port 8000
+python -m uvicorn backend.app.api.server:app --host 127.0.0.1 --port 8000
 ```
 
 健康检查地址为 `GET /healthz`，不会调用模型或工具。服务对每个客户端默认限制为每分钟 20 次请求；可通过 `AGENT_RATE_LIMIT` 和 `AGENT_RATE_WINDOW_SECONDS` 调整。
@@ -128,7 +128,7 @@ START → agent → tools? → agent → END
 
 ## 模型工厂与切换
 
-[models.py](models.py) 是唯一的大模型初始化入口。切换模型只需修改 `.env.local`：
+[backend/app/models/factory.py](backend/app/models/factory.py) 是唯一的大模型初始化入口。切换模型只需修改 `.env.local`：
 
 ```text
 # OpenAI
@@ -152,7 +152,7 @@ MODEL_NAME=gpt-4.1-mini
 OpenAI 的基础适配器已安装。若要改用 Ollama、Anthropic 或 Google，只需安装对应可选依赖：
 
 ```powershell
-python -m pip install -r requirements-model-providers.txt
+python -m pip install -r backend/requirements-model-providers.txt
 ```
 
 模型调用接口保持一致，因此工具、MCP、记忆、规划和 SSE 均不需要修改。
@@ -172,7 +172,7 @@ npm run dev
 默认连接 `http://127.0.0.1:8000`。需要先在另一个终端运行后端：
 
 ```powershell
-python -m uvicorn server:app --host 127.0.0.1 --port 8000
+python -m uvicorn backend.app.api.server:app --host 127.0.0.1 --port 8000
 ```
 
 如果后端设置了 `AGENT_API_KEY`，在前端“连接设置”中填写；该值只保留在当前页面内存中。开发环境的跨域白名单默认为 Vite 的两个本机地址，生产部署请用 `AGENT_CORS_ORIGINS` 配置明确的前端域名。

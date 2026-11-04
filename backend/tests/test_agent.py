@@ -4,11 +4,11 @@ import unittest
 from types import SimpleNamespace
 from pathlib import Path
 
-from agent import checkpoint_config, checkpoint_scope, evaluate_expression, stream_events, weather_code_description
+from backend.app.agent.service import checkpoint_config, checkpoint_scope, evaluate_expression, stream_events, weather_code_description
 from langgraph.checkpoint.memory import MemorySaver
-from memory import SQLiteMemoryStore
-from models import ModelConfigurationError, get_model_settings
-from security import SlidingWindowRateLimiter, valid_api_key
+from backend.app.memory.store import SQLiteMemoryStore
+from backend.app.models.factory import ModelConfigurationError, get_model_settings
+from backend.app.security import SlidingWindowRateLimiter, valid_api_key
 
 
 class CalculatorTests(unittest.TestCase):

@@ -7,6 +7,8 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+from backend.app.config import MEMORY_SCHEMA_FILE
 from typing import Protocol
 
 
@@ -118,9 +120,8 @@ class PostgresMemoryStore:
         return self._psycopg.connect(self.database_url)
 
     def _initialize_schema(self) -> None:
-        schema_path = Path(__file__).with_name("db").joinpath("init.sql")
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(schema_path.read_text(encoding="utf-8"))
+            cursor.execute(MEMORY_SCHEMA_FILE.read_text(encoding="utf-8"))
 
     def remember(self, user_id: str, content: str) -> int:
         content = content.strip()

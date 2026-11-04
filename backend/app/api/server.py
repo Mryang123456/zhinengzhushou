@@ -10,9 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent import build_agent, checkpoint_scope, stream_events
-from models import ModelConfigurationError, ensure_model_ready, get_model_settings
-from security import SlidingWindowRateLimiter, valid_api_key
+from backend.app.agent.service import build_agent, checkpoint_scope, stream_events
+from backend.app.config import MCP_CONFIG_FILE, MEMORY_DB_FILE
+from backend.app.models.factory import ModelConfigurationError, ensure_model_ready, get_model_settings
+from backend.app.security import SlidingWindowRateLimiter, valid_api_key
 
 
 app = FastAPI(title="基础智能体流式服务")
@@ -69,8 +70,8 @@ async def chat_stream(
 
     async def generate():
         try:
-            mcp_config = Path(__file__).with_name("mcp.json") if request.use_mcp else None
-            memory_db = Path(__file__).with_name("data").joinpath("memory.db") if request.use_memory else None
+            mcp_config = MCP_CONFIG_FILE if request.use_mcp else None
+            memory_db = MEMORY_DB_FILE if request.use_memory else None
             async with checkpoint_scope(os.getenv("CHECKPOINT_DATABASE_URL")) as checkpointer:
                 graph = await build_agent(
                     mcp_config,

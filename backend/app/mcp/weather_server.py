@@ -2,7 +2,7 @@
 
 from mcp.server.fastmcp import FastMCP
 
-from agent import get_weather
+from backend.app.agent.service import get_weather
 
 
 mcp = FastMCP("weather")
