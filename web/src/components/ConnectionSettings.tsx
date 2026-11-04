@@ -1,0 +1,3 @@
+import { X } from "lucide-react";
+type Props = { apiUrl: string; apiKey: string; onApiKey: (value: string) => void; onClose: () => void; };
+export function ConnectionSettings({ apiUrl, apiKey, onApiKey, onClose }: Props) { return <div className="modal-backdrop" onMouseDown={onClose}><section className="settings" onMouseDown={(e) => e.stopPropagation()}><div><h2>连接设置</h2><button className="icon-button" onClick={onClose}><X size={19}/></button></div><label>服务地址<input value={apiUrl} readOnly /></label><label>访问密钥 <input type="password" value={apiKey} onChange={(e) => onApiKey(e.target.value)} placeholder="仅在服务端启用鉴权时填写" /></label><p>密钥仅保存在当前页面内存中，刷新页面后会自动清除。</p></section></div>; }

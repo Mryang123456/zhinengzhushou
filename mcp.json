@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "weather": {
+      "command": "python",
+      "args": ["weather_mcp_server.py"],
+      "transport": "stdio"
+    },
+    "search": {
+      "command": "ddgs",
+      "args": ["mcp"],
+      "transport": "stdio"
+    }
+  }
+}

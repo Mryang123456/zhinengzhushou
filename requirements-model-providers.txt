@@ -1,0 +1,4 @@
+# 可选模型适配器。只需安装你要使用的提供商。
+langchain-ollama>=1.0,<2.0
+langchain-anthropic>=1.0,<2.0
+langchain-google-genai>=4.0,<5.0

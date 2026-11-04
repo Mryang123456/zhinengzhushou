@@ -1,0 +1,4 @@
+import { useCallback, useRef, useState } from "react";
+import { streamAgentResponse } from "../services/agentApi";
+import type { StreamEvent } from "../types";
+export function useAgentStream(apiUrl: string) { const [isSending, setIsSending] = useState(false); const controllerRef = useRef<AbortController | null>(null); const send = useCallback(async (request: { question: string; threadId: string; userId: string; apiKey: string }, onEvent: (event: StreamEvent) => void) => { const controller = new AbortController(); controllerRef.current = controller; setIsSending(true); try { await streamAgentResponse(apiUrl, request, controller.signal, onEvent); } finally { setIsSending(false); controllerRef.current = null; } }, [apiUrl]); const stop = useCallback(() => controllerRef.current?.abort(), []); return { isSending, send, stop }; }
