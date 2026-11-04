@@ -9,6 +9,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from backend.app.memory.store import SQLiteMemoryStore
 from backend.app.models.factory import ModelConfigurationError, get_model_settings
 from backend.app.security import SlidingWindowRateLimiter, valid_api_key
+from backend.app.config import SKILLS_DIR
+from backend.app.skills.registry import load_skills, match_skills, select_tool_names
+from backend.app.intent.policy import classify
+from backend.app.quality.validator import validate_answer
 
 
 class CalculatorTests(unittest.TestCase):
@@ -81,6 +85,23 @@ class CalculatorTests(unittest.TestCase):
                 return checkpointer
 
         self.assertIsInstance(asyncio.run(get_checkpointer()), MemorySaver)
+
+    def test_skills_are_loaded_and_routed_by_explicit_trigger(self):
+        skills = load_skills(SKILLS_DIR)
+        matched = match_skills("帮我调研今天的人工智能新闻", skills)
+        self.assertEqual([skill.name for skill in matched], ["联网调研"])
+        self.assertEqual(match_skills("解释一段 Python 代码", skills), [])
+        self.assertEqual(select_tool_names(matched, ["calculator", "web_search", "get_weather", "search_search_text"]), ["calculator", "web_search", "search_search_text"])
+
+    def test_intent_policy_clarifies_ambiguous_or_missing_context(self):
+        skills = load_skills(SKILLS_DIR)
+        self.assertEqual(classify("帮我查资料", skills)["status"], "allow")
+        self.assertEqual(classify("帮我规划旅行", skills)["status"], "clarify")
+
+    def test_quality_gate_blocks_unverified_freshness_and_high_risk(self):
+        self.assertFalse(validate_answer("今天北京天气", "晴朗", [])["ok"])
+        self.assertFalse(validate_answer("应该买哪只股票", "买入 A", [])["ok"])
+        self.assertTrue(validate_answer("解释 Python 列表", "列表是有序集合。", [])["ok"])
 
 
 if __name__ == "__main__":

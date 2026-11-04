@@ -10,21 +10,25 @@ import operator
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import NotRequired, TypedDict
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from ddgs import DDGS
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, MessagesState, StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 
-from backend.app.config import ENV_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE
+from backend.app.config import ENV_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE, SKILLS_DIR
 from backend.app.memory.store import MemoryStore, create_memory_store
 from backend.app.models.factory import ModelConfigurationError, create_chat_model, ensure_model_ready, get_model_settings
+from backend.app.skills.registry import Skill, format_skill_context, load_skills, match_skills, select_tool_names
+from backend.app.intent.policy import classify
+from backend.app.quality.validator import validate_answer
 
 load_dotenv(ENV_FILE)
 
@@ -33,6 +37,12 @@ SYSTEM_PROMPT = """你是一名简洁、可靠的中文助手。
 计算时使用 calculator；查询当前天气时使用 get_weather；查询最新或可由外部验证的信息时使用 web_search。
 回答中请附上网页检索结果的链接。除非本回合调用了相关工具，否则不要声称信息是最新的。
 工具失败时，简要说明限制，不要编造答案。"""
+
+
+class AgentState(MessagesState):
+    """包含本回合工具白名单的 LangGraph 状态。"""
+    allowed_tool_names: NotRequired[list[str]]
+    intent: NotRequired[dict]
 
 _BINARY_OPERATORS = {
     ast.Add: operator.add,
@@ -199,6 +209,16 @@ def create_memory_tools(memory_store: MemoryStore, user_id: str):
     return [remember_memory, recall_memory, forget_memory]
 
 
+def create_skill_tools(skills: list[Skill]):
+    """提供可审计的 Skill 清单；Skill 指令只能由本地目录加载。"""
+    @tool
+    def list_skills() -> str:
+        """查看当前智能体可用的专用技能及其用途。"""
+        return "\n".join(f"- {skill.name}：{skill.description}" for skill in skills)
+
+    return [list_skills]
+
+
 def load_mcp_connections(config_path: Path) -> dict:
     """加载显式 MCP 服务配置；绝不从聊天输入中接受服务启动命令。"""
     try:
@@ -245,6 +265,8 @@ async def build_agent(
 ):
     """构建同时包含本地工具和已发现 MCP 工具的工作流。"""
     tools = TOOLS.copy()
+    skills = load_skills(SKILLS_DIR)
+    tools.extend(create_skill_tools(skills))
     memory_store = create_memory_store(memory_database_url, memory_db_path)
     if memory_store:
         tools.extend(create_memory_tools(memory_store, user_id))
@@ -256,9 +278,11 @@ async def build_agent(
         )
         tools.extend(await client.get_tools())
 
-    model = create_chat_model().bind_tools(tools)
+    model = create_chat_model()
+    tool_by_name = {item.name: item for item in tools}
+    tool_node = ToolNode(tools)
 
-    async def call_model(state: MessagesState):
+    async def call_model(state: AgentState):
         writer = get_stream_writer()
         response = None
         memory_context = (
@@ -272,8 +296,19 @@ async def build_agent(
             "只有用户明确要求记住时才能调用 remember_memory；"
             "只有用户明确要求删除时才能调用 forget_memory。"
         )
-        async for chunk in model.astream(
-            [SystemMessage(SYSTEM_PROMPT + memory_instruction), *state["messages"]]
+        question = next(
+            (content_to_text(message.content) for message in reversed(state["messages"]) if isinstance(message, HumanMessage)),
+            "",
+        )
+        intent = state.get("intent", {})
+        active_skills = [skill for skill in skills if skill.name in intent.get("skills", [])]
+        allowed_tool_names = select_tool_names(active_skills, list(tool_by_name))
+        allowed_tools = [tool_by_name[name] for name in allowed_tool_names]
+        skill_instruction = "\n\n本回合匹配到的专用 Skill 规则：\n" + format_skill_context(active_skills)
+        if active_skills:
+            writer({"type": "skill_selected", "skills": [skill.name for skill in active_skills]})
+        async for chunk in model.bind_tools(allowed_tools).astream(
+            [SystemMessage(SYSTEM_PROMPT + memory_instruction + skill_instruction), *state["messages"]]
         ):
             text = content_to_text(chunk.content)
             if text:
@@ -288,14 +323,50 @@ async def build_agent(
                     "tools": [tool_call["name"] for tool_call in response.tool_calls],
                 }
             )
-        return {"messages": [response]}
+        return {"messages": [response], "allowed_tool_names": allowed_tool_names}
 
-    graph = StateGraph(MessagesState)
+    def identify_intent(state: AgentState):
+        question = next((content_to_text(message.content) for message in reversed(state["messages"]) if isinstance(message, HumanMessage)), "")
+        decision = classify(question, skills)
+        get_stream_writer()({"type": "intent", "status": decision["status"], "confidence": decision["confidence"], "reason": decision["reason"]})
+        return {"intent": decision}
+
+    def clarify_intent(state: AgentState):
+        return {"messages": [AIMessage(content=state["intent"]["question"])]}
+
+    async def execute_tools(state: AgentState):
+        """在执行前二次校验模型调用，阻止越权工具名。"""
+        calls = getattr(state["messages"][-1], "tool_calls", [])
+        blocked = [call for call in calls if call["name"] not in set(state.get("allowed_tool_names", []))]
+        if blocked:
+            return {"messages": [ToolMessage(content="该工具不在当前 Skill 的允许范围内，请改用已授权工具或向用户追问。", tool_call_id=call["id"], name=call["name"]) for call in blocked]}
+        return await tool_node.ainvoke(state)
+
+    def quality_gate(state: AgentState):
+        """在输出前执行证据、时效性与高风险领域的硬性质量门。"""
+        answer = content_to_text(state["messages"][-1].content)
+        question = next((content_to_text(message.content) for message in reversed(state["messages"]) if isinstance(message, HumanMessage)), "")
+        result = validate_answer(question, answer, state["messages"])
+        get_stream_writer()({"type": "quality", "passed": result["ok"], "reason": result["reason"]})
+        if result["ok"]:
+            return {}
+        return {"messages": [AIMessage(content=result["replacement"])]}
+
+    def route_after_agent(state: AgentState):
+        return "tools" if getattr(state["messages"][-1], "tool_calls", []) else "quality"
+
+    graph = StateGraph(AgentState)
+    graph.add_node("intent", identify_intent)
+    graph.add_node("clarify", clarify_intent)
     graph.add_node("agent", call_model)
-    graph.add_node("tools", ToolNode(tools))
-    graph.add_edge(START, "agent")
-    graph.add_conditional_edges("agent", tools_condition, {"tools": "tools", END: END})
+    graph.add_node("tools", execute_tools)
+    graph.add_node("quality", quality_gate)
+    graph.add_edge(START, "intent")
+    graph.add_conditional_edges("intent", lambda state: state["intent"]["status"], {"allow": "agent", "clarify": "clarify"})
+    graph.add_edge("clarify", END)
+    graph.add_conditional_edges("agent", route_after_agent, {"tools": "tools", "quality": "quality"})
     graph.add_edge("tools", "agent")
+    graph.add_edge("quality", END)
     return graph.compile(checkpointer=checkpointer or MemorySaver())
 
 
@@ -330,7 +401,7 @@ async def stream_events(app, question: str, thread_id: str, user_id: str = "defa
             if node_name == "tools":
                 tool_names = [getattr(message, "name", "工具") for message in messages]
                 yield {"type": "tool_end", "tools": tool_names}
-            elif node_name == "agent" and messages:
+            elif node_name in {"agent", "clarify", "quality"} and messages:
                 candidate = content_to_text(messages[-1].content)
                 if candidate:
                     final_answer = candidate
