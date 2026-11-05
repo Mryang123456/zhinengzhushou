@@ -5,6 +5,19 @@
       "weather_": "L1",
       "search_": "L1"
     },
+    "toolPolicies": {
+      "weather_current_weather": {
+        "arguments": {
+          "location": {"type": "string", "required": true, "minLength": 1, "maxLength": 80}
+        }
+      },
+      "search_": {
+        "arguments": {
+          "query": {"type": "string", "required": true, "minLength": 1, "maxLength": 500},
+          "max_results": {"type": "integer", "minimum": 1, "maximum": 8}
+        }
+      }
+    },
     "timeoutSeconds": 15,
     "retries": 1
   },

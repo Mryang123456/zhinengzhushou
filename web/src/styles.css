@@ -6,3 +6,5 @@
 .message.user { flex-direction: row-reverse; }
 .message.user .message-body { display: flex; flex-direction: column; align-items: flex-end; }
 .message.user .bubble { background: #e9f0ff; border-radius: 14px 5px 14px 14px; }
+
+.approval-card { display:grid; gap:8px; width:min(520px, 100%); margin-top:14px; padding:13px; border:1px solid #e6c878; border-radius:10px; background:#fff9e8; color:#624a13; font-size:13px; }.approval-card strong { font-size:14px; }.approval-card code { max-height:90px; overflow:auto; padding:8px; border-radius:6px; background:#fffdf6; color:#5b4a20; white-space:pre-wrap; word-break:break-word; }.approval-card button { width:fit-content; padding:8px 12px; border:0; border-radius:7px; background:#a97006; color:#fff; font-weight:700; }.approval-status { color:#756330; font-weight:650; }

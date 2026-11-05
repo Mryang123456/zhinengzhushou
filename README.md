@@ -106,9 +106,13 @@ python -m uvicorn backend.app.api.server:app --port 8000
 
 ### MCP 治理
 
-`backend/config/mcp.json` 除服务配置外还包含治理信息：允许服务、工具风险级别、超时和重试。L0/L1 工具可以自动执行；未登记、私有读取或写入类工具默认 L2，后端会阻断并返回“需要用户确认”。每次 MCP 调用都会写入 `data/mcp_audit.jsonl`，参数仅记录哈希；输出会限制大小并过滤常见提示词注入语句。
+`backend/config/mcp.json` 除服务配置外还包含治理信息：允许服务、工具风险级别、工具参数策略、超时和重试。L0/L1 工具可以自动执行；未登记、私有读取或写入类工具默认 L2。服务端会校验 MCP 服务是否出现在 `allowedServers` 中，并只向模型暴露 `toolPolicies` 已登记的工具。
 
-当前本地版本实现了审批前阻断；正式生产环境还应把 L2-L4 接入前端审批页和 LangGraph interrupt/checkpoint 恢复，并在容器或沙箱中运行 stdio MCP 服务。
+每个已登记工具必须明确允许参数名、类型和边界；例如天气地点最多 80 个字符，搜索关键词最多 500 个字符、`max_results` 只能在 1 到 8。策略外工具、额外参数、错误类型及超出边界的参数都会在执行前审计并拒绝，审批确认接口也会重新校验同一策略。
+
+L2-L4 工具会创建一个 5 分钟有效、一次性的审批记录，并通过 SSE 发送工具名、风险等级和脱敏参数预览。前端点击“确认并执行”后，会携带一次性令牌请求 `POST /mcp/approvals/{approval_id}/confirm`；令牌在服务端以哈希保存，并由 SQLite 原子消费，避免重复执行。审批及执行结果会写入 `data/mcp_audit.jsonl`。当前示例的天气与搜索均为 L1，因此只有你新增 L2 及以上 MCP 工具时才会出现审批卡片。
+
+生产部署仍应在此基础上接入 JWT 身份，把审批绑定到真实用户，并把审批记录迁移到 PostgreSQL/Redis；stdio MCP 服务也应运行在容器或沙箱中。
 
 ## Skill 技能系统
 
@@ -136,15 +140,17 @@ KNOWLEDGE_DATABASE_URL=postgresql://agent:你的密码@localhost:5432/agent_memo
 # 可选：只有设置后才调用付费 Embedding；未设置时使用关键词检索回退。
 KNOWLEDGE_EMBEDDING_PROVIDER=openai
 KNOWLEDGE_EMBEDDING_MODEL=text-embedding-3-small
+# 检索结果的最低相关度；低于该值的片段不会交给模型。
+KNOWLEDGE_MIN_SCORE=0.22
 ```
 
 基础版支持导入 UTF-8 的 `.txt`、`.md`、`.json` 文件：
 
 ```powershell
-python -m backend.app.knowledge.cli .\资料\产品说明.md
+python -m backend.app.knowledge.cli .\资料\产品说明.md --owner-id 开发者A --scope private
 ```
 
-导入时会切分文本、记录来源并按配置生成向量。Agent 仅在配置知识库地址后暴露 `search_knowledge_base` 工具，且该工具归属于“联网调研”Skill 的白名单；检索结果始终返回文档来源与片段编号。
+导入时必须指定所属用户或租户；`private` 仅所属用户可检索，`shared` 才允许其他用户检索。导入会切分文本、记录来源并按配置生成向量。Agent 仅在配置知识库地址后暴露 `search_knowledge_base` 工具，且该工具归属于“联网调研”Skill 的白名单；检索结果会过滤低相关度片段，并始终返回 `knowledge://文档ID#片段` 引用。文档内容被视为不可信资料，不能改变系统指令。
 
 ## 服务端基础防护
 

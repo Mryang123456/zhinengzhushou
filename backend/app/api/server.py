@@ -10,8 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from backend.app.agent.service import build_agent, checkpoint_scope, stream_events
-from backend.app.config import MCP_CONFIG_FILE, MEMORY_DB_FILE
+from backend.app.agent.service import build_agent, checkpoint_scope, load_mcp_connections, stream_events
+from backend.app.config import MCP_APPROVAL_DB_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE
+from backend.app.mcp.approval import ApprovalStore
+from backend.app.mcp.governance import RISK_ORDER, invoke_governed, is_registered_tool, load_governance, risk_for_tool, validate_tool_arguments
 from backend.app.models.factory import ModelConfigurationError, ensure_model_ready, get_model_settings
 from backend.app.security import SlidingWindowRateLimiter, valid_api_key
 
@@ -29,6 +31,7 @@ rate_limiter = SlidingWindowRateLimiter(
     limit=int(os.getenv("AGENT_RATE_LIMIT", "20")),
     window_seconds=int(os.getenv("AGENT_RATE_WINDOW_SECONDS", "60")),
 )
+approval_store = ApprovalStore(MCP_APPROVAL_DB_FILE)
 
 
 class ChatRequest(BaseModel):
@@ -37,6 +40,11 @@ class ChatRequest(BaseModel):
     user_id: str = Field(default="default", min_length=1, max_length=120)
     use_mcp: bool = True
     use_memory: bool = True
+
+
+class ApprovalConfirmation(BaseModel):
+    user_id: str = Field(min_length=1, max_length=120)
+    confirmation_token: str = Field(min_length=20, max_length=200)
 
 
 @app.get("/healthz")
@@ -98,3 +106,44 @@ async def chat_stream(
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+@app.post("/mcp/approvals/{approval_id}/confirm")
+async def confirm_mcp_approval(
+    approval_id: str,
+    confirmation: ApprovalConfirmation,
+    http_request: Request,
+    x_agent_api_key: str | None = Header(default=None),
+) -> dict[str, str]:
+    """消费一次性确认令牌后，执行之前被拦截的高风险 MCP 工具。"""
+    verify_request(http_request, x_agent_api_key)
+    action = approval_store.consume(approval_id, confirmation.user_id, confirmation.confirmation_token)
+    if not action:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该确认请求无效、已过期或已被使用。")
+
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+
+        governance = load_governance(MCP_CONFIG_FILE)
+        client = MultiServerMCPClient(load_mcp_connections(MCP_CONFIG_FILE), tool_name_prefix=True)
+        tools = {tool.name: tool for tool in await client.get_tools()}
+        tool = tools.get(action["tool"])
+        if not tool or not is_registered_tool(tool.name, governance) or RISK_ORDER.get(risk_for_tool(tool.name, governance), 4) < RISK_ORDER["L2"]:
+            raise RuntimeError("待执行的 MCP 工具不在受控高风险注册表中。")
+        arguments = validate_tool_arguments(tool.name, action["arguments"], governance)
+        result = await invoke_governed(
+            tool,
+            arguments,
+            action["risk"],
+            confirmation.user_id,
+            f"approval:{approval_id}",
+            governance.get("timeoutSeconds", 15),
+            governance.get("retries", 1),
+            approved=True,
+            approval_id=approval_id,
+        )
+    except Exception:
+        logger.exception("已确认的 MCP 操作执行失败：approval_id=%s", approval_id)
+        result = "已确认的工具操作执行失败，未返回可用结果。"
+    approval_store.complete(approval_id, result)
+    return {"status": "completed", "result": result}

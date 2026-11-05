@@ -5,6 +5,7 @@ import { ConnectionSettings } from "./components/ConnectionSettings";
 import { MessageList } from "./components/MessageList";
 import { Sidebar } from "./components/Sidebar";
 import { useAgentStream } from "./hooks/useAgentStream";
+import { confirmMcpApproval } from "./services/agentApi";
 import type { Message, Session, StreamEvent } from "./types";
 
 const API_URL = import.meta.env.VITE_AGENT_API_URL ?? "http://127.0.0.1:8000";
@@ -25,13 +26,25 @@ export default function App() {
     if (event.type === "token") return { ...item, content: item.content + (event.content ?? "") };
     if (event.type === "tool_start") return { ...item, toolEvents: [...(item.toolEvents ?? []), `正在调用：${(event.tools ?? ["工具"]).join("、")}`] };
     if (event.type === "tool_end") return { ...item, toolEvents: [...(item.toolEvents ?? []), `调用完成：${(event.tools ?? ["工具"]).join("、")}`] };
+    if (event.type === "approval_required" && event.approval_id && event.confirmation_token && event.tool && event.risk && event.arguments && event.expires_at) return { ...item, approval: { approvalId: event.approval_id, confirmationToken: event.confirmation_token, tool: event.tool, risk: event.risk, arguments: event.arguments, expiresAt: event.expires_at, status: "pending" }, toolEvents: [...(item.toolEvents ?? []), `等待确认：${event.tool}（${event.risk}）`] };
     if (event.type === "error") return { ...item, content: event.message ?? "请求失败，请稍后重试。", pending: false };
     if (event.type === "done") return { ...item, content: event.content || item.content, pending: false };
     return item;
   })), [updateMessages]);
+  const confirmApproval = async (messageId: string) => {
+    const approval = activeSession.messages.find((message) => message.id === messageId)?.approval;
+    if (!approval || approval.status !== "pending") return;
+    updateMessages(activeSession.id, (items) => items.map((item) => item.id === messageId ? { ...item, approval: { ...approval, status: "executing" } } : item));
+    try {
+      const response = await confirmMcpApproval(API_URL, approval.approvalId, userId, approval.confirmationToken, apiKey);
+      updateMessages(activeSession.id, (items) => items.map((item) => item.id === messageId ? { ...item, approval: { ...approval, status: "completed" }, content: `${item.content}\n\n已执行已确认操作（${approval.tool}）：\n${response.result}` } : item));
+    } catch (error) {
+      updateMessages(activeSession.id, (items) => items.map((item) => item.id === messageId ? { ...item, approval: { ...approval, status: "failed" }, content: `${item.content}\n\n确认操作失败：${(error as Error).message}` } : item));
+    }
+  };
   const selectSession = (id: string) => { setActiveId(id); if (window.innerWidth <= 760) setSidebarOpen(false); };
   const createSession = () => { if (isSending) return; const session = newSession(`会话-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`); setSessions((items) => [session, ...items]); setActiveId(session.id); setQuestion(""); if (window.innerWidth <= 760) setSidebarOpen(false); };
   const renameSession = (title: string) => setSessions((items) => items.map((item) => item.id === activeId ? { ...item, title } : item));
   const submit = async (event: FormEvent) => { event.preventDefault(); const text = question.trim(); if (!text || isSending) return; const sessionId = activeSession.id; const assistantId = createId(); updateMessages(sessionId, (items) => [...items, { id: createId(), role: "user", content: text }, { id: assistantId, role: "assistant", content: "", toolEvents: [], pending: true }]); setQuestion(""); try { await send({ question: text, threadId: activeSession.title, userId, apiKey }, (streamEvent) => updateMessage(sessionId, assistantId, streamEvent)); } catch (error) { const content = (error as Error).name === "AbortError" ? "已停止生成。" : `连接失败：${(error as Error).message}`; updateMessage(sessionId, assistantId, { type: "error", message: content }); } };
-  return <main className="app-shell"><Sidebar open={sidebarOpen} sessions={sessions} activeId={activeId} onNew={createSession} onSelect={selectSession} onSettings={() => setShowSettings(true)} onClose={() => setSidebarOpen(false)}/><section className="chat-panel"><ChatHeader sidebarOpen={sidebarOpen} userId={userId} threadTitle={activeSession.title} onUserId={setUserId} onThreadTitle={renameSession} onToggleSidebar={() => setSidebarOpen((open) => !open)}/><MessageList messages={activeSession.messages}/><Composer value={question} isSending={isSending} onChange={setQuestion} onSubmit={submit} onStop={stop}/></section>{showSettings ? <ConnectionSettings apiUrl={API_URL} apiKey={apiKey} onApiKey={setApiKey} onClose={() => setShowSettings(false)}/> : null}</main>;
+  return <main className="app-shell"><Sidebar open={sidebarOpen} sessions={sessions} activeId={activeId} onNew={createSession} onSelect={selectSession} onSettings={() => setShowSettings(true)} onClose={() => setSidebarOpen(false)}/><section className="chat-panel"><ChatHeader sidebarOpen={sidebarOpen} userId={userId} threadTitle={activeSession.title} onUserId={setUserId} onThreadTitle={renameSession} onToggleSidebar={() => setSidebarOpen((open) => !open)}/><MessageList messages={activeSession.messages} onConfirmApproval={confirmApproval}/><Composer value={question} isSending={isSending} onChange={setQuestion} onSubmit={submit} onStop={stop}/></section>{showSettings ? <ConnectionSettings apiUrl={API_URL} apiKey={apiKey} onApiKey={setApiKey} onClose={() => setShowSettings(false)}/> : null}</main>;
 }
