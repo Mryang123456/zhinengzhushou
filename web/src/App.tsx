@@ -5,7 +5,7 @@ import { ConnectionSettings } from "./components/ConnectionSettings";
 import { MessageList } from "./components/MessageList";
 import { Sidebar } from "./components/Sidebar";
 import { useAgentStream } from "./hooks/useAgentStream";
-import { confirmMcpApproval } from "./services/agentApi";
+import { confirmMcpApproval, login } from "./services/agentApi";
 import type { Message, Session, StreamEvent } from "./types";
 
 const API_URL = import.meta.env.VITE_AGENT_API_URL ?? "http://127.0.0.1:8000";
@@ -16,7 +16,7 @@ const newSession = (title = `会话-${new Date().toISOString().slice(0, 10)}`): 
 export default function App() {
   const [sessions, setSessions] = useState<Session[]>(() => [newSession(), newSession("产品调研"), newSession("工具调用示例")]);
   const [activeId, setActiveId] = useState(() => sessions[0].id);
-  const [question, setQuestion] = useState(""); const [userId, setUserId] = useState("开发者A"); const [apiKey, setApiKey] = useState("");
+  const [question, setQuestion] = useState(""); const [userId, setUserId] = useState("本地开发用户"); const [apiKey, setApiKey] = useState(""); const [accessToken, setAccessToken] = useState("");
   const [showSettings, setShowSettings] = useState(false); const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
   const { isSending, send, stop } = useAgentStream(API_URL);
   const activeSession = useMemo(() => sessions.find((session) => session.id === activeId) ?? sessions[0], [activeId, sessions]);
@@ -36,15 +36,16 @@ export default function App() {
     if (!approval || approval.status !== "pending") return;
     updateMessages(activeSession.id, (items) => items.map((item) => item.id === messageId ? { ...item, approval: { ...approval, status: "executing" } } : item));
     try {
-      const response = await confirmMcpApproval(API_URL, approval.approvalId, userId, approval.confirmationToken, apiKey);
+      const response = await confirmMcpApproval(API_URL, approval.approvalId, approval.confirmationToken, apiKey, accessToken);
       updateMessages(activeSession.id, (items) => items.map((item) => item.id === messageId ? { ...item, approval: { ...approval, status: "completed" }, content: `${item.content}\n\n已执行已确认操作（${approval.tool}）：\n${response.result}` } : item));
     } catch (error) {
       updateMessages(activeSession.id, (items) => items.map((item) => item.id === messageId ? { ...item, approval: { ...approval, status: "failed" }, content: `${item.content}\n\n确认操作失败：${(error as Error).message}` } : item));
     }
   };
+  const loginUser = async (username: string, password: string) => { const response = await login(API_URL, username, password); setAccessToken(response.accessToken); setUserId(response.userId); };
   const selectSession = (id: string) => { setActiveId(id); if (window.innerWidth <= 760) setSidebarOpen(false); };
   const createSession = () => { if (isSending) return; const session = newSession(`会话-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`); setSessions((items) => [session, ...items]); setActiveId(session.id); setQuestion(""); if (window.innerWidth <= 760) setSidebarOpen(false); };
   const renameSession = (title: string) => setSessions((items) => items.map((item) => item.id === activeId ? { ...item, title } : item));
-  const submit = async (event: FormEvent) => { event.preventDefault(); const text = question.trim(); if (!text || isSending) return; const sessionId = activeSession.id; const assistantId = createId(); updateMessages(sessionId, (items) => [...items, { id: createId(), role: "user", content: text }, { id: assistantId, role: "assistant", content: "", toolEvents: [], pending: true }]); setQuestion(""); try { await send({ question: text, threadId: activeSession.title, userId, apiKey }, (streamEvent) => updateMessage(sessionId, assistantId, streamEvent)); } catch (error) { const content = (error as Error).name === "AbortError" ? "已停止生成。" : `连接失败：${(error as Error).message}`; updateMessage(sessionId, assistantId, { type: "error", message: content }); } };
-  return <main className="app-shell"><Sidebar open={sidebarOpen} sessions={sessions} activeId={activeId} onNew={createSession} onSelect={selectSession} onSettings={() => setShowSettings(true)} onClose={() => setSidebarOpen(false)}/><section className="chat-panel"><ChatHeader sidebarOpen={sidebarOpen} userId={userId} threadTitle={activeSession.title} onUserId={setUserId} onThreadTitle={renameSession} onToggleSidebar={() => setSidebarOpen((open) => !open)}/><MessageList messages={activeSession.messages} onConfirmApproval={confirmApproval}/><Composer value={question} isSending={isSending} onChange={setQuestion} onSubmit={submit} onStop={stop}/></section>{showSettings ? <ConnectionSettings apiUrl={API_URL} apiKey={apiKey} onApiKey={setApiKey} onClose={() => setShowSettings(false)}/> : null}</main>;
+  const submit = async (event: FormEvent) => { event.preventDefault(); const text = question.trim(); if (!text || isSending) return; const sessionId = activeSession.id; const assistantId = createId(); updateMessages(sessionId, (items) => [...items, { id: createId(), role: "user", content: text }, { id: assistantId, role: "assistant", content: "", toolEvents: [], pending: true }]); setQuestion(""); try { await send({ question: text, threadId: activeSession.title, apiKey, accessToken }, (streamEvent) => updateMessage(sessionId, assistantId, streamEvent)); } catch (error) { const content = (error as Error).name === "AbortError" ? "已停止生成。" : `连接失败：${(error as Error).message}`; updateMessage(sessionId, assistantId, { type: "error", message: content }); } };
+  return <main className="app-shell"><Sidebar open={sidebarOpen} sessions={sessions} activeId={activeId} onNew={createSession} onSelect={selectSession} onSettings={() => setShowSettings(true)} onClose={() => setSidebarOpen(false)}/><section className="chat-panel"><ChatHeader sidebarOpen={sidebarOpen} userId={userId} threadTitle={activeSession.title} onThreadTitle={renameSession} onToggleSidebar={() => setSidebarOpen((open) => !open)}/><MessageList messages={activeSession.messages} onConfirmApproval={confirmApproval}/><Composer value={question} isSending={isSending} onChange={setQuestion} onSubmit={submit} onStop={stop}/></section>{showSettings ? <ConnectionSettings apiUrl={API_URL} apiKey={apiKey} userId={userId} onApiKey={setApiKey} onLogin={loginUser} onClose={() => setShowSettings(false)}/> : null}</main>;
 }

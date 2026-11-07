@@ -8,7 +8,7 @@ from backend.app.agent.service import checkpoint_config, checkpoint_scope, evalu
 from langgraph.checkpoint.memory import MemorySaver
 from backend.app.memory.store import SQLiteMemoryStore
 from backend.app.models.factory import ModelConfigurationError, get_model_settings
-from backend.app.security import SlidingWindowRateLimiter, valid_api_key
+from backend.app.security import AuthenticatedUser, AuthenticationError, SlidingWindowRateLimiter, authenticate_bearer, issue_access_token, password_hash, validate_multi_instance_configuration, valid_api_key, verify_password
 from backend.app.config import SKILLS_DIR
 from backend.app.skills.registry import load_skills, match_skills, select_tool_names
 from backend.app.intent.policy import classify
@@ -74,10 +74,43 @@ class CalculatorTests(unittest.TestCase):
         self.assertFalse(limiter.allow("127.0.0.1", now=3))
         self.assertTrue(limiter.allow("127.0.0.1", now=12))
 
+    def test_multi_instance_mode_requires_shared_state_services(self):
+        env = __import__("os").environ
+        keys = ("MULTI_INSTANCE_MODE", "REDIS_URL", "CHECKPOINT_DATABASE_URL", "MEMORY_DATABASE_URL")
+        previous = {key: env.get(key) for key in keys}
+        try:
+            env["MULTI_INSTANCE_MODE"] = "true"
+            for key in keys[1:]: env.pop(key, None)
+            with self.assertRaises(RuntimeError): validate_multi_instance_configuration()
+            env.update({"REDIS_URL": "redis://example", "CHECKPOINT_DATABASE_URL": "postgresql://example", "MEMORY_DATABASE_URL": "postgresql://example"})
+            validate_multi_instance_configuration()
+        finally:
+            for key, value in previous.items():
+                if value is None: env.pop(key, None)
+                else: env[key] = value
+
     def test_api_key_validation(self):
         self.assertTrue(valid_api_key(None, None))
         self.assertFalse(valid_api_key("错误", "正确"))
         self.assertTrue(valid_api_key("正确", "正确"))
+
+    def test_jwt_authentication_uses_signed_server_subject(self):
+        env = __import__("os").environ
+        previous = {key: env.get(key) for key in ("AUTH_REQUIRED", "JWT_SECRET")}
+        try:
+            env["AUTH_REQUIRED"] = "true"
+            env["JWT_SECRET"] = "x" * 32
+            token = issue_access_token(AuthenticatedUser("张三", ("user",)))
+            self.assertEqual(authenticate_bearer(f"Bearer {token}").user_id, "张三")
+            self.assertTrue(verify_password("long-test-password-123", password_hash("long-test-password-123")))
+            with self.assertRaises(AuthenticationError):
+                authenticate_bearer("Bearer invalid")
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = value
 
     def test_checkpoint_key_is_user_isolated(self):
         self.assertEqual(
@@ -148,10 +181,11 @@ class CalculatorTests(unittest.TestCase):
     def test_high_risk_mcp_approval_is_one_time_and_hides_secret_preview(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ApprovalStore(Path(directory) / "approvals.db")
-            created = store.create("张三", "calendar_create", {"title": "会议", "api_key": "secret"}, "L2")
+            created = store.create("张三", "calendar_create", {"title": "会议", "api_key": "secret"}, "L2", "帮我创建会议")
             self.assertEqual(created["arguments"]["api_key"], "[已隐藏]")
             action = store.consume(created["approval_id"], "张三", created["confirmation_token"])
             self.assertEqual(action["tool"], "calendar_create")
+            self.assertEqual(action["question"], "帮我创建会议")
             self.assertIsNone(store.consume(created["approval_id"], "张三", created["confirmation_token"]))
             self.assertEqual(preview_arguments({"token": "x"}), {"token": "[已隐藏]"})
 

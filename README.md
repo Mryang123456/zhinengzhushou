@@ -79,7 +79,7 @@ python -m uvicorn backend.app.api.server:app --port 8000
 随后向 `POST http://127.0.0.1:8000/chat/stream` 发送 JSON：
 
 ```json
-{"question":"查询新加坡天气", "thread_id":"用户-001", "user_id":"张三", "use_mcp":true, "use_memory":true}
+{"question":"查询新加坡天气", "thread_id":"会话-001", "use_mcp":true, "use_memory":true}
 ```
 
 响应为 `text/event-stream`，事件类型包括 `token`、`tool_start`、`tool_end`、`done` 和 `error`。前端可用原生 `fetch` 读取流，或使用 SSE 兼容客户端逐条渲染。
@@ -112,7 +112,7 @@ python -m uvicorn backend.app.api.server:app --port 8000
 
 L2-L4 工具会创建一个 5 分钟有效、一次性的审批记录，并通过 SSE 发送工具名、风险等级和脱敏参数预览。前端点击“确认并执行”后，会携带一次性令牌请求 `POST /mcp/approvals/{approval_id}/confirm`；令牌在服务端以哈希保存，并由 SQLite 原子消费，避免重复执行。审批及执行结果会写入 `data/mcp_audit.jsonl`。当前示例的天气与搜索均为 L1，因此只有你新增 L2 及以上 MCP 工具时才会出现审批卡片。
 
-生产部署仍应在此基础上接入 JWT 身份，把审批绑定到真实用户，并把审批记录迁移到 PostgreSQL/Redis；stdio MCP 服务也应运行在容器或沙箱中。
+审批确认后，原始工具输出不会直接返回界面，而是会作为不可信证据重新进入受控续答与质量校验。生产多实例部署应启用 Redis 作为审批与限流的共享状态；stdio MCP 服务也应运行在容器或沙箱中。
 
 ## Skill 技能系统
 
@@ -163,6 +163,38 @@ python -m uvicorn backend.app.api.server:app --host 127.0.0.1 --port 8000
 健康检查地址为 `GET /healthz`，不会调用模型或工具。服务对每个客户端默认限制为每分钟 20 次请求；可通过 `AGENT_RATE_LIMIT` 和 `AGENT_RATE_WINDOW_SECONDS` 调整。
 
 生产环境请在 `.env.local` 设置 `AGENT_API_KEY` 为随机长密钥。设置后，请求 `/chat/stream` 必须携带 `X-Agent-Api-Key` 请求头；未设置时仅适合本地开发。服务端日志保留具体异常，但 SSE 客户端不会收到可能含敏感细节的原始错误信息。
+
+### JWT 身份认证
+
+本地开发默认 `AUTH_REQUIRED=false`，服务端会使用固定的 `local-development` 身份，且不再接受客户端传递的 `user_id`。生产环境必须在 `.env.local` 配置：
+
+```text
+AUTH_REQUIRED=true
+JWT_SECRET=至少32字符的随机密钥
+AUTH_BOOTSTRAP_USER=admin
+AUTH_BOOTSTRAP_PASSWORD_HASH=pbkdf2_sha256$...
+```
+
+可在本机生成密码哈希（请自行输入密码，不要将明文提交到仓库）：
+
+```powershell
+python -c "from backend.app.security import password_hash; print(password_hash(input('密码: ')))"
+```
+
+前端“连接与登录”中登录后会将短时 JWT 仅存于页面内存，并在聊天与 MCP 审批请求的 `Authorization: Bearer` 请求头中发送。服务端从 JWT 的 `sub` 取得用户身份，因此记忆、知识库 ACL、会话检查点和审批不再信任前端提供的用户标识。生产建议将初始账号登录替换为企业 OIDC/SSO。
+
+### 多实例安全状态
+
+多实例部署时必须启用以下配置，服务启动会校验并拒绝降级到进程内或本地文件状态：
+
+```text
+MULTI_INSTANCE_MODE=true
+REDIS_URL=redis://localhost:6379/0
+MEMORY_DATABASE_URL=postgresql://agent:密码@localhost:5432/agent_memory
+CHECKPOINT_DATABASE_URL=postgresql://agent:密码@localhost:5432/agent_memory
+```
+
+Redis 负责跨实例的请求限流和 MCP 一次性审批令牌；审批令牌通过 Lua 脚本原子消费，避免请求被负载均衡到不同实例后重复执行。PostgreSQL 负责长期记忆、知识库和 LangGraph checkpoint。`docker compose up -d` 会同时启动 PostgreSQL 与 Redis；本地单实例开发不设置 `MULTI_INSTANCE_MODE` 时仍可使用轻量回退。
 
 ## 结构
 
