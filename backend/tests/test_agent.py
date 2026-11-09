@@ -12,7 +12,7 @@ from backend.app.memory.store import SQLiteMemoryStore
 from backend.app.models.factory import ModelConfigurationError, get_model_settings
 from backend.app.security import AuthenticatedUser, AuthenticationError, SlidingWindowRateLimiter, authenticate_bearer, issue_access_token, login_rate_identity, password_hash, validate_multi_instance_configuration, validate_production_configuration, valid_api_key, verify_password
 from backend.app.config import SKILLS_DIR
-from backend.app.skills.registry import load_skills, match_skills, select_tool_names
+from backend.app.skills.registry import load_skills, match_skills, select_tool_names, select_top_tool_candidates
 from backend.app.intent.policy import classify
 from backend.app.quality.validator import validate_answer
 from backend.app.knowledge.chunking import split_text
@@ -205,6 +205,8 @@ class CalculatorTests(unittest.TestCase):
         self.assertEqual([skill.name for skill in matched], ["联网调研"])
         self.assertEqual(match_skills("解释一段 Python 代码", skills), [])
         self.assertEqual(select_tool_names(matched, ["calculator", "web_search", "get_weather", "search_search_text"]), ["calculator", "web_search", "search_search_text"])
+        candidates = select_top_tool_candidates("查询北京天气", ["get_weather", "search_news", "calendar_create"], {"get_weather": "查询当前天气", "search_news": "搜索新闻", "calendar_create": "创建日历"}, limit=1)
+        self.assertEqual(candidates, ["get_weather"])
 
     def test_intent_policy_clarifies_ambiguous_or_missing_context(self):
         skills = load_skills(SKILLS_DIR)

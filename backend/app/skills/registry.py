@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 
 @dataclass(frozen=True)
@@ -59,3 +60,19 @@ def select_tool_names(skills: list[Skill], available_names: list[str]) -> list[s
         elif any(name == pattern or (pattern.endswith("*") and name.startswith(pattern[:-1])) for pattern in patterns):
             selected.append(name)
     return selected
+
+
+def select_top_tool_candidates(question: str, tool_names: list[str], descriptions: dict[str, str], limit: int = 5) -> list[str]:
+    """在策略白名单内按词面相关度召回少量候选，避免模型面对全部工具。"""
+    if len(tool_names) <= limit:
+        return tool_names
+    terms = set(re.findall(r"[a-z0-9_]{2,}|[\u4e00-\u9fff]{1,2}", question.lower()))
+    ranked = sorted(
+        tool_names,
+        key=lambda name: (
+            sum(term in (name + " " + descriptions.get(name, "")).lower() for term in terms),
+            name,
+        ),
+        reverse=True,
+    )
+    return ranked[:limit]
