@@ -23,6 +23,7 @@ from backend.app.mcp.approval import ApprovalStore, preview_arguments
 from backend.app.knowledge.store import format_untrusted_evidence, validate_access_scope
 from backend.app.observability import observe_duration, prometheus_metrics
 from backend.app.content_safety import contains_secret, is_direct_prompt_override, sanitize_untrusted_text
+from backend.app.agent.tool_retrieval import retrieve_tool_candidates
 
 
 class CalculatorTests(unittest.TestCase):
@@ -207,6 +208,15 @@ class CalculatorTests(unittest.TestCase):
         self.assertEqual(select_tool_names(matched, ["calculator", "web_search", "get_weather", "search_search_text"]), ["calculator", "web_search", "search_search_text"])
         candidates = select_top_tool_candidates("查询北京天气", ["get_weather", "search_news", "calendar_create"], {"get_weather": "查询当前天气", "search_news": "搜索新闻", "calendar_create": "创建日历"}, limit=1)
         self.assertEqual(candidates, ["get_weather"])
+
+    def test_tool_retrieval_uses_local_lexical_fallback_without_embedding_configuration(self):
+        tools = {
+            "get_weather": SimpleNamespace(description="查询城市当前天气、气温和降水", args_schema=None),
+            "calendar_create": SimpleNamespace(description="创建日历会议", args_schema=None),
+        }
+        names, mode = retrieve_tool_candidates("北京今天的天气", tools, limit=1)
+        self.assertEqual(mode, "lexical")
+        self.assertEqual(names, ["get_weather"])
 
     def test_intent_policy_clarifies_ambiguous_or_missing_context(self):
         skills = load_skills(SKILLS_DIR)
