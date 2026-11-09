@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,23 @@ class ToolPolicyError(ValueError):
 def load_governance(path: Path) -> dict:
     config = json.loads(path.read_text(encoding="utf-8"))
     return config.get("mcpGovernance", {})
+
+
+def validate_mcp_servers(config: dict) -> None:
+    """服务命令、参数和传输必须与静态注册表一致。"""
+    governance, servers = config.get("mcpGovernance", {}), config.get("mcpServers", {})
+    policies = governance.get("serverPolicies", {})
+    if set(servers) != set(policies) or set(servers) != set(governance.get("allowedServers", [])):
+        raise ToolPolicyError("MCP 服务注册表与实际配置不一致。")
+    require_sandbox = os.getenv("MCP_SANDBOX_REQUIRED", "false").lower() in {"1", "true", "yes"}
+    for name, server in servers.items():
+        policy = policies[name]
+        if any(server.get(key) != policy.get(key) for key in ("command", "args", "transport")):
+            raise ToolPolicyError(f"MCP 服务 {name} 的启动配置未获授权。")
+        if server.get("transport") != "stdio":
+            raise ToolPolicyError(f"MCP 服务 {name} 使用了不允许的传输方式。")
+        if require_sandbox and policy.get("isolation") != "container":
+            raise ToolPolicyError(f"生产环境要求 MCP 服务 {name} 使用容器沙箱。")
 
 
 def risk_for_tool(name: str, governance: dict) -> str:

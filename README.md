@@ -49,6 +49,22 @@ python -m backend.main --user-id 张三
 
 长期记忆默认不会保存 API Key、密码等敏感值；可用 `--no-memory` 临时关闭。
 
+记忆会拦截常见密钥、密码、令牌、银行卡号和手机号模式；默认保留 365 天，可用 `MEMORY_TTL_DAYS` 调整。到期记忆不会再进入 Agent 上下文或检索结果。
+
+### 长对话上下文治理
+
+Checkpoint 会保留完整消息用于断点恢复与审计，但不会再把全文无限传给模型。服务端按上下文 token 预算保留最近的完整对话回合；超过预算的较早历史会合并为结构化摘要（偏好、已确认结论、待办和约束），再与最近回合、相关长期记忆一起发送。摘要调用超时或失败时会使用确定性压缩记录，仍保持上下文上限。
+
+```text
+# 默认模型上下文窗口为 128K token，预留 8K token 给回答与工具调用。
+# 仅在当前模型至少支持 128K 上下文时使用该配置。
+CONTEXT_WINDOW_TOKENS=131072
+CONTEXT_RESPONSE_RESERVE_TOKENS=8192
+CONTEXT_SUMMARY_TIMEOUT_SECONDS=15
+```
+
+不同模型应按实际窗口调整 `CONTEXT_WINDOW_TOKENS`；摘要仅是背景，当前用户问题和本回合工具证据始终优先。
+
 ### PostgreSQL + pgvector
 
 生产环境推荐 PostgreSQL + pgvector。`docker-compose.yml` 和 `backend/db/init.sql` 已准备好数据库、用户隔离索引与 `embedding vector(1536)` 列。
@@ -110,6 +126,8 @@ python -m uvicorn backend.app.api.server:app --port 8000
 
 每个已登记工具必须明确允许参数名、类型和边界；例如天气地点最多 80 个字符，搜索关键词最多 500 个字符、`max_results` 只能在 1 到 8。策略外工具、额外参数、错误类型及超出边界的参数都会在执行前审计并拒绝，审批确认接口也会重新校验同一策略。
 
+每个 MCP 服务还必须在 `serverPolicies` 中登记其命令、参数和传输方式，实际配置不一致即拒绝加载。工具层默认单批最多 3 次、单回合最多 6 次调用，并分别有单工具 20 秒、单请求 90 秒超时；客户端断开连接时服务会停止流式任务。可通过环境变量调整这些预算。
+
 L2-L4 工具会创建一个 5 分钟有效、一次性的审批记录，并通过 SSE 发送工具名、风险等级和脱敏参数预览。前端点击“确认并执行”后，会携带一次性令牌请求 `POST /mcp/approvals/{approval_id}/confirm`；令牌在服务端以哈希保存，并由 SQLite 原子消费，避免重复执行。审批及执行结果会写入 `data/mcp_audit.jsonl`。当前示例的天气与搜索均为 L1，因此只有你新增 L2 及以上 MCP 工具时才会出现审批卡片。
 
 审批确认后，原始工具输出不会直接返回界面，而是会作为不可信证据重新进入受控续答与质量校验。生产多实例部署应启用 Redis 作为审批与限流的共享状态；stdio MCP 服务也应运行在容器或沙箱中。
@@ -129,7 +147,13 @@ Skill 匹配后，模型只会看到该 Skill 声明的工具及基础低风险�
 
 ## 严格意图门控
 
-每个请求先经过 `backend/app/intent/policy.py`：未识别、多个同分意图或出行缺少地点时，工作流直接返回澄清问题，不调用模型和工具。仅当规则判定通过，才进入 Agent 并生成本回合工具白名单。意图决策会作为 SSE `intent` 事件输出，便于前端和日志系统审计。
+每个请求先经过 `backend/app/intent/policy.py`：它会结合显式触发词、同义表达、轻微拼写容错和基础任务规则进行评分；未识别、近似竞争意图或出行缺少地点时，工作流直接返回澄清问题，不调用模型和工具。明确连接词下最多合并两个高置信技能。仅当规则判定通过，才进入 Agent 并生成本回合工具白名单。意图决策会作为 SSE `intent` 事件输出，便于前端和日志系统审计。
+
+回答质量门会校验时效性工具证据、网页链接/知识库引用的可追溯性，以及关键事实是否紧邻其对应证据；无法逐条溯源时会安全降级而不是输出确定性结论。
+
+## 可观测性与 CI
+
+每个 HTTP 请求会生成或继承 `X-Request-Id`，并写入结构化事件日志；`GET /metrics` 提供 Prometheus 文本格式的基础事件计数。仓库的 `.github/workflows/ci.yml` 会在推送和 PR 时运行后端单元测试、Python 编译检查与前端生产构建。
 
 ## 知识库与 pgvector
 
@@ -195,6 +219,10 @@ CHECKPOINT_DATABASE_URL=postgresql://agent:密码@localhost:5432/agent_memory
 ```
 
 Redis 负责跨实例的请求限流和 MCP 一次性审批令牌；审批令牌通过 Lua 脚本原子消费，避免请求被负载均衡到不同实例后重复执行。PostgreSQL 负责长期记忆、知识库和 LangGraph checkpoint。`docker compose up -d` 会同时启动 PostgreSQL 与 Redis；本地单实例开发不设置 `MULTI_INSTANCE_MODE` 时仍可使用轻量回退。
+
+### MCP 运行隔离
+
+当前示例 MCP 使用受注册表约束的本地 stdio 服务，适用于开发。生产环境应把每个 MCP 服务放入最小权限容器，设置只读文件系统、非 root 用户、CPU/内存/PID 限制和网络出口白名单；服务配置中的 `isolation` 必须改为 `container`，再设置 `MCP_SANDBOX_REQUIRED=true`。该开关会拒绝启动任何仍声明为 `local` 的 MCP 服务，防止生产环境误用未隔离进程。
 
 ## 结构
 

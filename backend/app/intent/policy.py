@@ -1,23 +1,42 @@
-"""严格的确定性意图门控：不确定时优先澄清，不执行工具。"""
+"""可解释、保守的意图路由：支持同义表达和受控复合任务。"""
+
+import re
+from difflib import SequenceMatcher
 
 from backend.app.skills.registry import Skill
 
+ALIASES = {
+    "联网调研": ("网上查", "帮我找", "搜一下", "资料收集", "市场研究", "新闻动态", "最新消息"),
+    "出行规划": ("去哪玩", "旅行安排", "旅游攻略", "路线安排", "行程安排", "出游"),
+}
+MATH_PATTERN = re.compile(r"^[\d\s+\-*/%().]+$|\b(计算|算一下|求值)\b", re.I)
+CASUAL_PATTERN = re.compile(r"^(你好|嗨|谢谢|帮助|你能做什么)[！!？?。\s]*$")
+MEMORY_PATTERN = re.compile(r"记住|回忆|想起|删除.*记忆|忘记")
+
+
+def _score(skill: Skill, normalized: str) -> float:
+    terms = (*skill.triggers, *ALIASES.get(skill.name, ()))
+    exact = sum(1 for term in terms if term in normalized)
+    fuzzy = max((SequenceMatcher(None, term, normalized).ratio() for term in terms if len(term) >= 3), default=0.0)
+    return exact * 2 + (0.75 if exact == 0 and fuzzy >= 0.62 else 0.0)
+
 
 def classify(question: str, skills: list[Skill]) -> dict:
-    normalized = question.lower().strip()
-    scored = [(skill, sum(trigger in normalized for trigger in skill.triggers)) for skill in skills]
-    matched = [(skill, score) for skill, score in scored if score]
+    normalized = re.sub(r"\s+", "", question.lower())
+    if MATH_PATTERN.search(normalized) or CASUAL_PATTERN.match(normalized) or MEMORY_PATTERN.search(normalized):
+        return {"status": "allow", "reason": "基础任务直通", "skills": [], "confidence": 0.95, "question": ""}
+    matched = [(skill, score) for skill, score in ((skill, _score(skill, normalized)) for skill in skills) if score > 0]
     if not matched:
-        return {"status": "clarify", "reason": "未识别到受支持意图", "skills": [], "confidence": 0.0,
-                "question": "为了避免使用错误工具，请说明你的目标：是联网调研、出行规划，还是其他任务？"}
+        return {"status": "clarify", "reason": "未识别到受支持意图", "skills": [], "confidence": 0.0, "question": "请说明目标和期望结果。我目前可处理联网调研、出行规划、计算和一般问答。"}
     matched.sort(key=lambda item: item[1], reverse=True)
-    if len(matched) > 1 and matched[0][1] == matched[1][1]:
-        return {"status": "clarify", "reason": "多个意图置信度相同", "skills": [], "confidence": 0.5,
-                "question": f"你的问题同时可能属于“{matched[0][0].name}”和“{matched[1][0].name}”。请说明优先目标。"}
-    skill, score = matched[0]
-    confidence = min(0.95, 0.7 + 0.15 * score)
-    has_required_context = not skill.required_context or any(item in normalized for item in skill.required_context)
-    if not has_required_context:
-        return {"status": "clarify", "reason": "缺少关键上下文", "skills": [], "confidence": confidence,
-                "question": f"为准确执行“{skill.name}”，请补充目的地或地点信息。"}
-    return {"status": "allow", "reason": "规则匹配通过", "skills": [skill.name], "confidence": confidence, "question": ""}
+    best_skill, best_score = matched[0]
+    secondary = [skill for skill, score in matched[1:] if score >= best_score * 0.8]
+    compound = bool(re.search(r"并且|同时|再|以及|和", normalized))
+    selected = [best_skill] + (secondary[:1] if compound else [])
+    if secondary and not compound:
+        return {"status": "clarify", "reason": "多个意图置信度接近", "skills": [], "confidence": 0.55, "question": f"你的问题可能同时涉及“{best_skill.name}”和“{secondary[0].name}”。请说明优先目标。"}
+    missing = [skill.name for skill in selected if skill.required_context and not any(item in normalized for item in skill.required_context)]
+    confidence = min(0.97, 0.62 + 0.12 * best_score + (0.08 if len(normalized) >= 6 else 0))
+    if missing:
+        return {"status": "clarify", "reason": "缺少关键上下文", "skills": [], "confidence": confidence, "question": f"为准确执行“{'、'.join(missing)}”，请补充目的地或地点信息。"}
+    return {"status": "allow", "reason": "同义词与规则匹配通过", "skills": [skill.name for skill in selected], "confidence": confidence, "question": ""}

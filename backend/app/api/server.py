@@ -3,6 +3,8 @@
 import json
 import logging
 import os
+import asyncio
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -16,6 +18,7 @@ from backend.app.mcp.approval import create_approval_store
 from backend.app.mcp.governance import RISK_ORDER, invoke_governed, is_registered_tool, load_governance, risk_for_tool, validate_tool_arguments
 from backend.app.models.factory import ModelConfigurationError, ensure_model_ready, get_model_settings
 from backend.app.security import AuthenticationError, AuthenticatedUser, authenticate_bearer, auth_required, create_rate_limiter, issue_access_token, validate_multi_instance_configuration, valid_api_key, verify_bootstrap_credentials
+from backend.app.observability import event, prometheus_metrics, trace_id
 
 
 app = FastAPI(title="基础智能体流式服务")
@@ -33,6 +36,19 @@ rate_limiter = create_rate_limiter(
     window_seconds=int(os.getenv("AGENT_RATE_WINDOW_SECONDS", "60")),
 )
 approval_store = create_approval_store(MCP_APPROVAL_DB_FILE)
+
+
+@app.middleware("http")
+async def trace_request(request: Request, call_next):
+    request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    token = trace_id.set(request_id)
+    try:
+        event("http_request", method=request.method, path=request.url.path)
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        return response
+    finally:
+        trace_id.reset(token)
 
 
 class ChatRequest(BaseModel):
@@ -57,6 +73,12 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint():
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(prometheus_metrics(), media_type="text/plain; version=0.0.4")
+
+
 def verify_request(request: Request, api_key: str | None) -> None:
     """执行可选 API 密钥验证与进程内限流。"""
     expected_key = os.getenv("AGENT_API_KEY")
@@ -64,6 +86,7 @@ def verify_request(request: Request, api_key: str | None) -> None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="访问密钥无效。")
     client_host = request.client.host if request.client else "unknown"
     if not rate_limiter.allow(client_host):
+        event("rate_limit_rejected", client=client_host)
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="请求过于频繁，请稍后重试。")
 
 
@@ -88,6 +111,7 @@ async def create_token(credentials: TokenRequest) -> dict[str, str | int]:
 @app.get("/auth/me")
 async def current_user(authorization: str | None = Header(default=None)) -> dict[str, object]:
     user = authenticated_user(authorization)
+    event("agent_started", user_id=user.user_id, thread_id=request.thread_id)
     return {"user_id": user.user_id, "roles": list(user.roles), "authentication_required": auth_required()}
 
 
@@ -118,11 +142,20 @@ async def chat_stream(
                     os.getenv("MEMORY_DATABASE_URL") if request.use_memory else None,
                     checkpointer,
                 )
-                async for event in stream_events(
-                    graph, request.question, request.thread_id, user.user_id
-                ):
-                    yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                async with asyncio.timeout(float(os.getenv("AGENT_REQUEST_TIMEOUT_SECONDS", "90"))):
+                    async for event in stream_events(
+                        graph, request.question, request.thread_id, user.user_id
+                    ):
+                        if await http_request.is_disconnected():
+                            logger.info("客户端已断开，取消任务：thread_id=%s", request.thread_id)
+                            return
+                        yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except TimeoutError:
+            event("agent_timeout", user_id=user.user_id, thread_id=request.thread_id)
+            event = {"type": "error", "message": "任务执行超时，已安全停止。"}
+            yield f"event: error\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as error:
+            event("agent_failed", user_id=user.user_id, error=type(error).__name__)
             logger.exception("智能体流式请求失败：thread_id=%s user_id=%s", request.thread_id, user.user_id)
             event = {"type": "error", "message": "智能体执行失败，请稍后重试或查看服务日志。"}
             yield f"event: error\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"

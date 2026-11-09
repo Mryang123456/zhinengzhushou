@@ -9,7 +9,7 @@ from pathlib import Path
 from backend.app.config import KNOWLEDGE_SCHEMA_FILE
 from backend.app.knowledge.chunking import split_text
 from backend.app.knowledge.embeddings import EmbeddingUnavailable, embed_texts
-from backend.app.knowledge.rerank import rerank
+from backend.app.knowledge.rerank import reciprocal_rank_fusion, rerank
 
 INSTRUCTION_PATTERN = re.compile(r"ignore (previous|all) instructions|system prompt|你现在是|忽略.*指令", re.I)
 
@@ -69,14 +69,18 @@ class KnowledgeStore:
             vector = embed_texts([query])[0]
         except EmbeddingUnavailable:
             vector = None
+        candidate_limit = max(limit * 4, 20)
         with self._connect() as connection, connection.cursor() as cursor:
+            rankings: list[list[dict]] = []
             if vector:
                 vector_text = "[" + ",".join(map(str, vector)) + "]"
-                cursor.execute("SELECT d.id, d.source, c.chunk_index, c.content, 1 - (c.embedding <=> %s::vector) AS score FROM knowledge_chunks c JOIN knowledge_documents d ON d.id=c.document_id WHERE c.embedding IS NOT NULL AND d.status = 'active' AND (d.owner_id = %s OR d.access_scope = 'shared') ORDER BY c.embedding <=> %s::vector LIMIT %s", (vector_text, user_id, vector_text, limit))
-            else:
-                cursor.execute("SELECT d.id, d.source, c.chunk_index, c.content, CASE WHEN c.content ILIKE %s THEN 1.0 ELSE 0.0 END AS score FROM knowledge_chunks c JOIN knowledge_documents d ON d.id=c.document_id WHERE d.status = 'active' AND (d.owner_id = %s OR d.access_scope = 'shared') ORDER BY score DESC, c.id DESC LIMIT %s", (f"%{query.strip()}%", user_id, limit))
-            rows = [{"document_id": row[0], "source": row[1], "chunk": row[2], "content": row[3], "score": float(row[4]), "citation": f"knowledge://{row[0]}#{row[2]}"} for row in cursor.fetchall()]
-        return [row for row in rerank(query, rows, limit) if row["score"] >= threshold]
+                cursor.execute("SELECT d.id, d.source, c.chunk_index, c.content, 1 - (c.embedding <=> %s::vector) AS score FROM knowledge_chunks c JOIN knowledge_documents d ON d.id=c.document_id WHERE c.embedding IS NOT NULL AND d.status = 'active' AND (d.owner_id = %s OR d.access_scope = 'shared') ORDER BY c.embedding <=> %s::vector LIMIT %s", (vector_text, user_id, vector_text, candidate_limit))
+                rankings.append([{"document_id": row[0], "source": row[1], "chunk": row[2], "content": row[3], "score": float(row[4]), "citation": f"knowledge://{row[0]}#{row[2]}"} for row in cursor.fetchall()])
+            cursor.execute("SELECT d.id, d.source, c.chunk_index, c.content, ts_rank_cd(to_tsvector('simple', c.content), websearch_to_tsquery('simple', %s)) AS score FROM knowledge_chunks c JOIN knowledge_documents d ON d.id=c.document_id WHERE d.status = 'active' AND (d.owner_id = %s OR d.access_scope = 'shared') AND to_tsvector('simple', c.content) @@ websearch_to_tsquery('simple', %s) ORDER BY score DESC LIMIT %s", (query, user_id, query, candidate_limit))
+            rankings.append([{"document_id": row[0], "source": row[1], "chunk": row[2], "content": row[3], "score": float(row[4]), "citation": f"knowledge://{row[0]}#{row[2]}"} for row in cursor.fetchall()])
+        rows = reciprocal_rank_fusion(rankings, candidate_limit) if vector else rankings[0]
+        # 关键词分数和 RRF 分数尺度不同；无向量时命中即视为合格。
+        return [row for row in rerank(query, rows, limit) if vector is None or row["score"] >= threshold]
 
 
 def read_text_file(path: Path) -> str:

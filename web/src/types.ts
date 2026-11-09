@@ -30,4 +30,4 @@ export type StreamEvent = {
   expires_at?: number;
 };
 
-export type Session = { id: string; title: string; messages: Message[]; };
+export type Session = { id: string; title: string; messages: Message[]; updatedAt: number; archived?: boolean; };

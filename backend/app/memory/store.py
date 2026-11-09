@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import os
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend.app.config import MEMORY_SCHEMA_FILE
@@ -37,6 +38,7 @@ class SQLiteMemoryStore:
                 )
                 """
             )
+            connection.execute("ALTER TABLE memories ADD COLUMN expires_at TEXT") if "expires_at" not in {row[1] for row in connection.execute("PRAGMA table_info(memories)")} else None
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, id DESC)"
             )
@@ -55,7 +57,7 @@ class SQLiteMemoryStore:
 
     @staticmethod
     def _contains_sensitive_value(content: str) -> bool:
-        patterns = (r"\bsk-[A-Za-z0-9_-]+", r"\b(?:api[_-]?key|password|密码)\s*[:=]")
+        patterns = (r"\bsk-[A-Za-z0-9_-]+", r"\b(?:api[_-]?key|password|密码|secret|令牌|token)\s*[:=]", r"\b(?:\d[ -]?){13,19}\b", r"\b1[3-9]\d{9}\b")
         return any(re.search(pattern, content, flags=re.IGNORECASE) for pattern in patterns)
 
     def remember(self, user_id: str, content: str) -> int:
@@ -66,19 +68,21 @@ class SQLiteMemoryStore:
             raise ValueError("单条记忆不能超过 500 个字符。")
         if self._contains_sensitive_value(content):
             raise ValueError("检测到疑似密钥、密码或 API Key，拒绝保存。")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        ttl_days = max(1, min(int(os.getenv("MEMORY_TTL_DAYS", "365")), 3650))
+        expires_at = (now + timedelta(days=ttl_days)).isoformat()
         with self._connection() as connection:
             cursor = connection.execute(
-                "INSERT INTO memories(user_id, content, created_at, accessed_at) VALUES (?, ?, ?, ?)",
-                (user_id, content, now, now),
+                "INSERT INTO memories(user_id, content, created_at, accessed_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, content, now.isoformat(), now.isoformat(), expires_at),
             )
             return int(cursor.lastrowid)
 
     def recent(self, user_id: str, limit: int = 12) -> list[tuple[int, str]]:
         with self._connection() as connection:
             rows = connection.execute(
-                "SELECT id, content FROM memories WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-                (user_id, limit),
+                "SELECT id, content FROM memories WHERE user_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY id DESC LIMIT ?",
+                (user_id, datetime.now(timezone.utc).isoformat(), limit),
             ).fetchall()
         return [(int(row[0]), str(row[1])) for row in reversed(rows)]
 

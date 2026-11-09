@@ -19,7 +19,13 @@
       }
     },
     "timeoutSeconds": 15,
-    "retries": 1
+    "retries": 1,
+    "maxToolCalls": 6,
+    "maxToolBatch": 3,
+    "serverPolicies": {
+      "weather": {"command": "python", "args": ["-m", "backend.app.mcp.weather_server"], "transport": "stdio", "isolation": "local"},
+      "search": {"command": "ddgs", "args": ["mcp"], "transport": "stdio", "isolation": "local"}
+    }
   },
   "mcpServers": {
     "weather": {
