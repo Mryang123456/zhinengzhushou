@@ -29,6 +29,10 @@ def auth_required() -> bool:
     return os.getenv("AUTH_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 
 
+def is_production_environment() -> bool:
+    return os.getenv("ENVIRONMENT", "development").strip().lower() in {"production", "prod"}
+
+
 def _jwt_secret() -> str:
     secret = os.getenv("JWT_SECRET", "")
     if len(secret) < 32:
@@ -155,6 +159,12 @@ def create_rate_limiter(limit: int, window_seconds: int):
     return SlidingWindowRateLimiter(limit, window_seconds)
 
 
+def login_rate_identity(client_host: str, username: str) -> str:
+    """不在 Redis 键或日志中暴露登录名；同一用户名的大小写归一化。"""
+    digest = hashlib.sha256(username.strip().casefold().encode("utf-8")).hexdigest()[:24]
+    return f"login:{client_host}:user:{digest}"
+
+
 def validate_multi_instance_configuration() -> None:
     """生产多实例模式不允许降级到本地安全状态。"""
     enabled = os.getenv("MULTI_INSTANCE_MODE", "false").lower() in {"1", "true", "yes"}
@@ -163,6 +173,33 @@ def validate_multi_instance_configuration() -> None:
     missing = [name for name in ("REDIS_URL", "CHECKPOINT_DATABASE_URL", "MEMORY_DATABASE_URL") if not os.getenv(name)]
     if missing:
         raise RuntimeError(f"多实例模式缺少必需配置：{', '.join(missing)}")
+
+
+def validate_production_configuration() -> None:
+    """生产环境 fail-closed：禁止静默回退到开发认证和本地状态。"""
+    if not is_production_environment():
+        return
+    if not auth_required():
+        raise RuntimeError("生产环境必须设置 AUTH_REQUIRED=true。")
+    required = (
+        "JWT_SECRET",
+        "AUTH_BOOTSTRAP_USER",
+        "AUTH_BOOTSTRAP_PASSWORD_HASH",
+        "AGENT_CORS_ORIGINS",
+        "REDIS_URL",
+        "MEMORY_DATABASE_URL",
+        "CHECKPOINT_DATABASE_URL",
+    )
+    missing = [name for name in required if not os.getenv(name)]
+    if missing:
+        raise RuntimeError(f"生产环境缺少必需配置：{', '.join(missing)}")
+    _jwt_secret()
+    origins = [origin.strip() for origin in os.environ["AGENT_CORS_ORIGINS"].split(",")]
+    if not origins or any(not origin.startswith("https://") or origin == "*" or "localhost" in origin or "127.0.0.1" in origin for origin in origins):
+        raise RuntimeError("生产环境 AGENT_CORS_ORIGINS 必须为明确的非本地 HTTPS 前端域名。")
+    if os.getenv("MULTI_INSTANCE_MODE", "false").lower() not in {"1", "true", "yes"}:
+        raise RuntimeError("生产环境必须设置 MULTI_INSTANCE_MODE=true，禁止本地状态回退。")
+    validate_multi_instance_configuration()
 
 
 def valid_api_key(provided_key: str | None, expected_key: str | None) -> bool:

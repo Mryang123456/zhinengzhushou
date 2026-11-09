@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.app.config import PROJECT_ROOT
+from backend.app.content_safety import sanitize_untrusted_text
 
 RISK_ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
-INJECTION = re.compile(r"ignore (previous|all) instructions|system prompt|你现在是|忽略.*指令", re.I)
 
 
 class ToolPolicyError(ValueError):
@@ -99,8 +99,7 @@ def validate_tool_arguments(name: str, arguments: dict, governance: dict) -> dic
 
 
 def sanitize_output(value: object, maximum: int = 12000) -> str:
-    text = str(value)[:maximum]
-    return INJECTION.sub("[已移除疑似提示词注入内容]", text)
+    return sanitize_untrusted_text(value, maximum)
 
 
 def audit(event: dict) -> None:

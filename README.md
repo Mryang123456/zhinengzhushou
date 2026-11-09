@@ -49,7 +49,7 @@ python -m backend.main --user-id 张三
 
 长期记忆默认不会保存 API Key、密码等敏感值；可用 `--no-memory` 临时关闭。
 
-记忆会拦截常见密钥、密码、令牌、银行卡号和手机号模式；默认保留 365 天，可用 `MEMORY_TTL_DAYS` 调整。到期记忆不会再进入 Agent 上下文或检索结果。
+记忆会拦截常见密钥、密码、令牌、银行卡号和手机号模式；默认保留 365 天，可用 `MEMORY_TTL_DAYS` 调整。SQLite 与 PostgreSQL 都会写入并过滤 `expires_at`，到期记忆不会再进入 Agent 上下文或检索结果。
 
 ### 长对话上下文治理
 
@@ -184,7 +184,7 @@ python -m backend.app.knowledge.cli .\资料\产品说明.md --owner-id 开发�
 python -m uvicorn backend.app.api.server:app --host 127.0.0.1 --port 8000
 ```
 
-健康检查地址为 `GET /healthz`，不会调用模型或工具。服务对每个客户端默认限制为每分钟 20 次请求；可通过 `AGENT_RATE_LIMIT` 和 `AGENT_RATE_WINDOW_SECONDS` 调整。
+健康检查地址为 `GET /healthz`，不会调用模型或工具。服务对每个客户端默认限制为每分钟 20 次请求；可通过 `AGENT_RATE_LIMIT` 和 `AGENT_RATE_WINDOW_SECONDS` 调整。登录接口另按“来源 IP + 登录名哈希”限制为每 15 分钟 5 次，可通过 `LOGIN_RATE_LIMIT` 与 `LOGIN_RATE_WINDOW_SECONDS` 调整。SSE 每 15 秒会发送注释心跳，减少反向代理因空闲而切断长连接的情况。
 
 生产环境请在 `.env.local` 设置 `AGENT_API_KEY` 为随机长密钥。设置后，请求 `/chat/stream` 必须携带 `X-Agent-Api-Key` 请求头；未设置时仅适合本地开发。服务端日志保留具体异常，但 SSE 客户端不会收到可能含敏感细节的原始错误信息。
 
@@ -207,18 +207,21 @@ python -c "from backend.app.security import password_hash; print(password_hash(i
 
 前端“连接与登录”中登录后会将短时 JWT 仅存于页面内存，并在聊天与 MCP 审批请求的 `Authorization: Bearer` 请求头中发送。服务端从 JWT 的 `sub` 取得用户身份，因此记忆、知识库 ACL、会话检查点和审批不再信任前端提供的用户标识。生产建议将初始账号登录替换为企业 OIDC/SSO。
 
+设置 `ENVIRONMENT=production` 后，服务会在启动时 fail-closed：强制要求 JWT、初始认证账号、明确的 HTTPS 跨域白名单、Redis、PostgreSQL 记忆与 Checkpoint，以及 `MULTI_INSTANCE_MODE=true`。任何缺失都会拒绝启动，避免生产环境静默退回到本地文件或免认证模式。
+
 ### 多实例安全状态
 
 多实例部署时必须启用以下配置，服务启动会校验并拒绝降级到进程内或本地文件状态：
 
 ```text
 MULTI_INSTANCE_MODE=true
-REDIS_URL=redis://localhost:6379/0
+REDIS_PASSWORD=强密码
+REDIS_URL=redis://:强密码@localhost:6379/0
 MEMORY_DATABASE_URL=postgresql://agent:密码@localhost:5432/agent_memory
 CHECKPOINT_DATABASE_URL=postgresql://agent:密码@localhost:5432/agent_memory
 ```
 
-Redis 负责跨实例的请求限流和 MCP 一次性审批令牌；审批令牌通过 Lua 脚本原子消费，避免请求被负载均衡到不同实例后重复执行。PostgreSQL 负责长期记忆、知识库和 LangGraph checkpoint。`docker compose up -d` 会同时启动 PostgreSQL 与 Redis；本地单实例开发不设置 `MULTI_INSTANCE_MODE` 时仍可使用轻量回退。
+Redis 负责跨实例的请求限流和 MCP 一次性审批令牌；审批令牌通过 Lua 脚本原子消费，避免请求被负载均衡到不同实例后重复执行。PostgreSQL 负责长期记忆、知识库和 LangGraph checkpoint。`docker compose up -d` 会同时启动 PostgreSQL 与 Redis；数据库和 Redis 端口只绑定本机、Redis 强制密码并带健康检查。公网部署仍应通过私有网络、TLS 终止层、备份和受管密钥服务访问，不应直接暴露这两个端口。
 
 ### MCP 运行隔离
 

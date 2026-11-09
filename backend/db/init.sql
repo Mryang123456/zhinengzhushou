@@ -9,11 +9,17 @@ CREATE TABLE IF NOT EXISTS agent_memories (
     embedding vector(1536),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
     deleted_at TIMESTAMPTZ
 );
 
+ALTER TABLE agent_memories ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS idx_agent_memories_user_active
     ON agent_memories (user_id, id DESC)
+    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_agent_memories_expiry
+    ON agent_memories (expires_at)
     WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS knowledge_documents (

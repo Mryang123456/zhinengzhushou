@@ -135,10 +135,12 @@ class PostgresMemoryStore:
             raise ValueError("单条记忆不能超过 500 个字符。")
         if SQLiteMemoryStore._contains_sensitive_value(content):
             raise ValueError("检测到疑似密钥、密码或 API Key，拒绝保存。")
+        ttl_days = max(1, min(int(os.getenv("MEMORY_TTL_DAYS", "365")), 3650))
+        expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO agent_memories(user_id, content) VALUES (%s, %s) RETURNING id",
-                (user_id, content),
+                "INSERT INTO agent_memories(user_id, content, expires_at) VALUES (%s, %s, %s) RETURNING id",
+                (user_id, content, expires_at),
             )
             return int(cursor.fetchone()[0])
 
@@ -147,7 +149,7 @@ class PostgresMemoryStore:
             cursor.execute(
                 """
                 SELECT id, content FROM agent_memories
-                WHERE user_id = %s AND deleted_at IS NULL
+                WHERE user_id = %s AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())
                 ORDER BY id DESC LIMIT %s
                 """,
                 (user_id, limit),
@@ -161,7 +163,7 @@ class PostgresMemoryStore:
             cursor.execute(
                 """
                 SELECT id, content FROM agent_memories
-                WHERE user_id = %s AND deleted_at IS NULL
+                WHERE user_id = %s AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())
                 ORDER BY
                     CASE WHEN content ILIKE %s THEN 1 ELSE 0 END DESC,
                     accessed_at DESC, id DESC

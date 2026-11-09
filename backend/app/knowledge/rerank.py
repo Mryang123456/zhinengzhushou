@@ -3,6 +3,19 @@
 import re
 
 
+def lexical_terms(text: str) -> set[str]:
+    """中英文混合分词：中文加入二元词，避免整句中文只被当作一个词。"""
+    normalized = text.lower()
+    words = set(re.findall(r"[a-z0-9_]{2,}", normalized))
+    chinese_runs = re.findall(r"[\u4e00-\u9fff]+", normalized)
+    for run in chinese_runs:
+        if len(run) == 1:
+            words.add(run)
+        else:
+            words.update(run[index:index + 2] for index in range(len(run) - 1))
+    return words
+
+
 def reciprocal_rank_fusion(rankings: list[list[dict]], limit: int = 20, k: int = 60) -> list[dict]:
     """融合向量与关键词候选，避免任一召回通道独占结果。"""
     merged: dict[tuple, dict] = {}
@@ -14,8 +27,8 @@ def reciprocal_rank_fusion(rankings: list[list[dict]], limit: int = 20, k: int =
     return sorted(merged.values(), key=lambda row: row["score"], reverse=True)[:limit]
 
 def rerank(query: str, rows: list[dict], limit: int = 5) -> list[dict]:
-    terms = set(re.findall(r"[\w\u4e00-\u9fff]+", query.lower()))
+    terms = lexical_terms(query)
     for row in rows:
-        overlap = len(terms & set(re.findall(r"[\w\u4e00-\u9fff]+", row["content"].lower())))
+        overlap = len(terms & lexical_terms(row["content"]))
         row["score"] = round(float(row["score"]) + 0.08 * overlap, 4)
     return sorted(rows, key=lambda row: row["score"], reverse=True)[:limit]

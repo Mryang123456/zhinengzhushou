@@ -4,7 +4,9 @@ import json
 import logging
 import os
 import asyncio
+import time
 import uuid
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -17,11 +19,49 @@ from backend.app.config import MCP_APPROVAL_DB_FILE, MCP_CONFIG_FILE, MEMORY_DB_
 from backend.app.mcp.approval import create_approval_store
 from backend.app.mcp.governance import RISK_ORDER, invoke_governed, is_registered_tool, load_governance, risk_for_tool, validate_tool_arguments
 from backend.app.models.factory import ModelConfigurationError, ensure_model_ready, get_model_settings
-from backend.app.security import AuthenticationError, AuthenticatedUser, authenticate_bearer, auth_required, create_rate_limiter, issue_access_token, validate_multi_instance_configuration, valid_api_key, verify_bootstrap_credentials
-from backend.app.observability import event, prometheus_metrics, trace_id
+from backend.app.security import AuthenticationError, AuthenticatedUser, authenticate_bearer, auth_required, create_rate_limiter, issue_access_token, login_rate_identity, validate_multi_instance_configuration, validate_production_configuration, valid_api_key, verify_bootstrap_credentials
+from backend.app.observability import event, observe_duration, prometheus_metrics, trace_id
+from backend.app.content_safety import is_direct_prompt_override
 
 
-app = FastAPI(title="基础智能体流式服务")
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """生产数据库 Checkpoint 连接池随应用启动一次，避免每个会话重复建池。"""
+    database_url = os.getenv("CHECKPOINT_DATABASE_URL")
+    application.state.checkpointer = None
+    application.state.checkpoint_pool = None
+    pool = None
+    if database_url:
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            from psycopg_pool import AsyncConnectionPool
+            pool = AsyncConnectionPool(
+                conninfo=database_url,
+                kwargs={"autocommit": True, "prepare_threshold": 0},
+                min_size=1,
+                max_size=max(2, int(os.getenv("CHECKPOINT_POOL_MAX_SIZE", "10"))),
+                open=False,
+            )
+            await pool.open()
+            checkpointer = AsyncPostgresSaver(pool)
+            await checkpointer.setup()
+            application.state.checkpoint_pool = pool
+            application.state.checkpointer = checkpointer
+        except Exception:
+            # 已创建的连接池也必须关闭，避免启动失败后遗留连接。
+            pool = pool or getattr(application.state, "checkpoint_pool", None)
+            if pool:
+                await pool.close()
+            raise
+    try:
+        yield
+    finally:
+        pool = getattr(application.state, "checkpoint_pool", None)
+        if pool:
+            await pool.close()
+
+
+app = FastAPI(title="基础智能体流式服务", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("AGENT_CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(","),
@@ -31,9 +71,14 @@ app.add_middleware(
 )
 logger = logging.getLogger("langgraph_agent.server")
 validate_multi_instance_configuration()
+validate_production_configuration()
 rate_limiter = create_rate_limiter(
     limit=int(os.getenv("AGENT_RATE_LIMIT", "20")),
     window_seconds=int(os.getenv("AGENT_RATE_WINDOW_SECONDS", "60")),
+)
+login_rate_limiter = create_rate_limiter(
+    limit=int(os.getenv("LOGIN_RATE_LIMIT", "5")),
+    window_seconds=int(os.getenv("LOGIN_RATE_WINDOW_SECONDS", "900")),
 )
 approval_store = create_approval_store(MCP_APPROVAL_DB_FILE)
 
@@ -42,12 +87,14 @@ approval_store = create_approval_store(MCP_APPROVAL_DB_FILE)
 async def trace_request(request: Request, call_next):
     request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
     token = trace_id.set(request_id)
+    started = time.monotonic()
     try:
         event("http_request", method=request.method, path=request.url.path)
         response = await call_next(request)
         response.headers["X-Request-Id"] = request_id
         return response
     finally:
+        observe_duration("http_request", time.monotonic() - started)
         trace_id.reset(token)
 
 
@@ -98,10 +145,14 @@ def authenticated_user(authorization: str | None) -> AuthenticatedUser:
 
 
 @app.post("/auth/token")
-async def create_token(credentials: TokenRequest) -> dict[str, str | int]:
+async def create_token(credentials: TokenRequest, http_request: Request) -> dict[str, str | int]:
     """使用已配置的初始账号换取短时 JWT；可由 OIDC 替代。"""
     if not auth_required():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="当前是本地开发模式，不需要登录令牌。")
+    client_host = http_request.client.host if http_request.client else "unknown"
+    if not login_rate_limiter.allow(login_rate_identity(client_host, credentials.username)):
+        event("login_rate_limit_rejected", client=client_host)
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="登录尝试过于频繁，请稍后再试。")
     user = verify_bootstrap_credentials(credentials.username, credentials.password)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误。")
@@ -111,7 +162,7 @@ async def create_token(credentials: TokenRequest) -> dict[str, str | int]:
 @app.get("/auth/me")
 async def current_user(authorization: str | None = Header(default=None)) -> dict[str, object]:
     user = authenticated_user(authorization)
-    event("agent_started", user_id=user.user_id, thread_id=request.thread_id)
+    event("auth_me_read", user_id=user.user_id)
     return {"user_id": user.user_id, "roles": list(user.roles), "authentication_required": auth_required()}
 
 
@@ -125,6 +176,9 @@ async def chat_stream(
     """以 SSE 依次发送 token、工具事件、完成事件或错误事件。"""
     verify_request(http_request, x_agent_api_key)
     user = authenticated_user(authorization)
+    if is_direct_prompt_override(request.question):
+        event("prompt_override_rejected", user_id=user.user_id)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请求包含试图覆盖系统安全规则的内容，已拒绝处理。")
     try:
         ensure_model_ready(get_model_settings())
     except ModelConfigurationError as error:
@@ -134,22 +188,44 @@ async def chat_stream(
         try:
             mcp_config = MCP_CONFIG_FILE if request.use_mcp else None
             memory_db = MEMORY_DB_FILE if request.use_memory else None
-            async with checkpoint_scope(os.getenv("CHECKPOINT_DATABASE_URL")) as checkpointer:
+            shared_checkpointer = getattr(app.state, "checkpointer", None)
+            async with checkpoint_scope(None if shared_checkpointer else os.getenv("CHECKPOINT_DATABASE_URL")) as fallback_checkpointer:
                 graph = await build_agent(
                     mcp_config,
                     user.user_id,
                     memory_db,
                     os.getenv("MEMORY_DATABASE_URL") if request.use_memory else None,
-                    checkpointer,
+                    shared_checkpointer or fallback_checkpointer,
                 )
                 async with asyncio.timeout(float(os.getenv("AGENT_REQUEST_TIMEOUT_SECONDS", "90"))):
-                    async for event in stream_events(
-                        graph, request.question, request.thread_id, user.user_id
-                    ):
-                        if await http_request.is_disconnected():
-                            logger.info("客户端已断开，取消任务：thread_id=%s", request.thread_id)
-                            return
-                        yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    event_stream = stream_events(graph, request.question, request.thread_id, user.user_id)
+                    next_event = asyncio.create_task(anext(event_stream))
+                    try:
+                        while True:
+                            done, _ = await asyncio.wait({next_event}, timeout=15)
+                            if not done:
+                                if await http_request.is_disconnected():
+                                    logger.info("客户端已断开，取消任务：thread_id=%s", request.thread_id)
+                                    return
+                                # SSE 注释帧，保持反向代理与浏览器长连接存活。
+                                yield ": keep-alive\n\n"
+                                continue
+                            try:
+                                event = next_event.result()
+                            except StopAsyncIteration:
+                                break
+                            if await http_request.is_disconnected():
+                                logger.info("客户端已断开，取消任务：thread_id=%s", request.thread_id)
+                                return
+                            yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                            next_event = asyncio.create_task(anext(event_stream))
+                    finally:
+                        if not next_event.done():
+                            next_event.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await next_event
+                        with suppress(Exception):
+                            await event_stream.aclose()
         except TimeoutError:
             event("agent_timeout", user_id=user.user_id, thread_id=request.thread_id)
             event = {"type": "error", "message": "任务执行超时，已安全停止。"}

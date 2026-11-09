@@ -2,6 +2,7 @@
 
 import re
 from urllib.parse import urlparse
+from backend.app.content_safety import contains_secret
 
 FRESHNESS_TERMS = ("最新", "今天", "当前", "实时", "价格", "新闻", "天气", "政策")
 HIGH_RISK_TERMS = ("诊断", "用药", "疾病", "法律", "起诉", "合同", "投资", "股票", "理财", "贷款")
@@ -19,6 +20,8 @@ def validate_answer(question: str, answer: str, messages: list[object]) -> dict:
     lowered = question.lower()
     if not answer.strip() or len(answer) > 12000:
         return {"ok": False, "reason": "回答为空或超出安全长度", "replacement": "当前无法生成可安全验证的回答，请缩小问题范围后重试。"}
+    if contains_secret(answer):
+        return {"ok": False, "reason": "回答包含疑似敏感凭据", "replacement": "为保护安全，我不能在回答中展示访问密钥、令牌或密码等敏感凭据。"}
     if any(term in lowered for term in HIGH_RISK_TERMS):
         return {"ok": False, "reason": "高风险领域需要人工或权威专业来源复核", "replacement": "该问题涉及医疗、法律或金融等高风险领域。我不能提供未经专业核验的结论；请咨询持证专业人士或提供权威来源后再协助解读。"}
 
