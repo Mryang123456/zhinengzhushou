@@ -8,6 +8,9 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import ToolException
+
 from backend.app.config import PROJECT_ROOT
 from backend.app.content_safety import sanitize_untrusted_text
 
@@ -16,6 +19,10 @@ RISK_ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
 
 class ToolPolicyError(ValueError):
     """工具未注册或调用参数违反注册策略。"""
+
+
+class McpOutcomeUnknown(ToolException):
+    """审批后的调用未取得可确认的结果，外部副作用可能已发生。"""
 
 
 def load_governance(path: Path) -> dict:
@@ -41,10 +48,9 @@ def validate_mcp_servers(config: dict) -> None:
 
 
 def risk_for_tool(name: str, governance: dict) -> str:
-    for prefix, risk in governance.get("toolRisk", {}).items():
-        if name.startswith(prefix):
-            return risk
-    return "L2"
+    risks = governance.get("toolRisk", {})
+    prefix = max((prefix for prefix in risks if name.startswith(prefix)), key=len, default=None)
+    return risks[prefix] if prefix is not None else "L2"
 
 
 def policy_for_tool(name: str, governance: dict) -> dict | None:
@@ -113,16 +119,32 @@ def audit(event: dict) -> None:
 async def invoke_governed(tool, arguments: dict, risk: str, user_id: str, thread_id: str, timeout_seconds: int = 15, retries: int = 1, approved: bool = False, approval_id: str | None = None) -> str:
     """L2 及以上默认阻断；L0/L1 具备超时、重试、审计和输出清洗。"""
     argument_hash = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
-    if RISK_ORDER.get(risk, 4) >= RISK_ORDER["L2"] and not approved:
+    requires_approval = RISK_ORDER.get(risk, 4) >= RISK_ORDER["L2"]
+    if requires_approval and not approved:
         audit({"user_id": user_id, "thread_id": thread_id, "tool": tool.name, "risk": risk, "args_hash": argument_hash, "status": "approval_required", "approval_id": approval_id})
-        return "该工具涉及私有读取或写入操作，必须经过用户确认后才能执行。"
+        raise ToolException("该工具涉及私有读取或写入操作，必须经过用户确认后才能执行。")
+    retries = 0 if requires_approval else max(0, retries)
     for attempt in range(retries + 1):
         try:
             result = await asyncio.wait_for(tool.ainvoke(arguments), timeout=timeout_seconds)
+            if isinstance(result, ToolMessage):
+                if result.status != "success":
+                    raise ToolException("MCP 工具返回失败状态。")
+                result = result.content
+            if isinstance(result, list) and result and all(
+                isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+                for block in result
+            ):
+                result = "\n".join(block["text"] for block in result)
+            if result is None or result == [] or result == {} or (isinstance(result, str) and not result.strip()):
+                raise ToolException("MCP 工具没有返回内容。")
             audit({"user_id": user_id, "thread_id": thread_id, "tool": tool.name, "risk": risk, "args_hash": argument_hash, "status": "success", "attempt": attempt + 1, "approval_id": approval_id})
             return sanitize_output(result)
         except Exception as error:
             if attempt == retries:
-                audit({"user_id": user_id, "thread_id": thread_id, "tool": tool.name, "risk": risk, "args_hash": argument_hash, "status": "failed", "error": type(error).__name__, "approval_id": approval_id})
-                return "工具调用失败或超时，已停止重试。"
-    return "工具调用失败。"
+                status = "outcome_unknown" if requires_approval else "failed"
+                audit({"user_id": user_id, "thread_id": thread_id, "tool": tool.name, "risk": risk, "args_hash": argument_hash, "status": status, "error": type(error).__name__, "approval_id": approval_id})
+                if requires_approval:
+                    raise McpOutcomeUnknown("无法确认已审批操作的执行结果。请先核对外部系统状态，再决定是否重新提交。") from error
+                raise ToolException("MCP 工具调用失败、超时或没有返回内容。") from error
+    raise ToolException("MCP 工具调用失败。")

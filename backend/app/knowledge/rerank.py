@@ -1,6 +1,7 @@
 """无额外模型时的可解释重排序；可替换为 Cross Encoder。"""
 
 import re
+from dataclasses import dataclass
 
 
 def lexical_terms(text: str) -> set[str]:
@@ -28,7 +29,43 @@ def reciprocal_rank_fusion(rankings: list[list[dict]], limit: int = 20, k: int =
 
 def rerank(query: str, rows: list[dict], limit: int = 5) -> list[dict]:
     terms = lexical_terms(query)
+    scored = []
     for row in rows:
         overlap = len(terms & lexical_terms(row["content"]))
-        row["score"] = round(float(row["score"]) + 0.08 * overlap, 4)
-    return sorted(rows, key=lambda row: row["score"], reverse=True)[:limit]
+        scored.append({**row, "score": round(float(row["score"]) + 0.08 * overlap, 4)})
+    return sorted(scored, key=lambda row: row["score"], reverse=True)[:limit]
+
+
+@dataclass
+class RetrievalStages:
+    candidates: list[dict]
+    reranked: list[dict]
+    results: list[dict]
+    mode: str
+
+
+def rank_candidates(
+    query: str, vector_rows: list[dict] | None, keyword_rows: list[dict],
+    limit: int, minimum_similarity: float,
+) -> RetrievalStages:
+    """保留原始余弦相似度，用 RRF 和词面分排序，用独立的准入规则筛选。"""
+    vectors = {
+        row["citation"]: row["score"] for row in (vector_rows or [])
+    }
+    keyword_hits = {row["citation"] for row in keyword_rows}
+    if vector_rows is None:
+        candidates = keyword_rows
+    else:
+        candidates = reciprocal_rank_fusion(
+            [vector_rows, keyword_rows], limit=len(vector_rows) + len(keyword_rows)
+        )
+    ranked = rerank(query, candidates, len(candidates))
+    eligible = [
+        row for row in ranked
+        if row["citation"] in keyword_hits
+        or vectors.get(row["citation"], float("-inf")) >= minimum_similarity
+    ]
+    return RetrievalStages(
+        candidates, ranked[:limit], eligible[:limit],
+        "keyword" if vector_rows is None else "hybrid",
+    )

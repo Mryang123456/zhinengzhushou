@@ -4,6 +4,8 @@ export type Message = {
   content: string;
   toolEvents?: string[];
   pending?: boolean;
+  retryable?: boolean;
+  notice?: string;
   approval?: PendingApproval;
 };
 
@@ -17,11 +19,15 @@ export type PendingApproval = {
   status: "pending" | "executing" | "completed" | "failed";
 };
 
+export type ProgressStage = "preparing" | "understanding" | "context" | "drafting" | "checking";
+
 export type StreamEvent = {
-  type: "token" | "tool_start" | "tool_end" | "approval_required" | "done" | "error";
+  type: "progress" | "token" | "tool_start" | "tool_end" | "approval_required" | "done" | "error";
+  stage?: ProgressStage;
   content?: string;
   tools?: string[];
   message?: string;
+  retryable?: boolean;
   approval_id?: string;
   confirmation_token?: string;
   tool?: string;

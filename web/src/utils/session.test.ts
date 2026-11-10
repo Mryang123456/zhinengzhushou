@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveSessionState, createSessionTitle } from "./session";
+import { archiveSessionState, createSessionTitle, ensureVisibleSession, resolveVisibleSession } from "./session";
 
 describe("createSessionTitle", () => {
   it("在同一毫秒内高频创建时仍生成唯一标题", () => {
@@ -16,5 +16,24 @@ describe("createSessionTitle", () => {
     expect(state.sessions).toHaveLength(2);
     expect(state.sessions[0]).toEqual(replacement);
     expect(state.sessions[1].archived).toBe(true);
+  });
+});
+
+describe("恢复会话", () => {
+  const archived = { id: "archived", title: "已归档", messages: [], updatedAt: 3, archived: true };
+  const visible = { id: "visible", title: "可用会话", messages: [], updatedAt: 2 };
+  const replacement = { id: "replacement", title: "新会话", messages: [], updatedAt: 4 };
+
+  it("跳过列表开头或选中项中的归档会话", () => {
+    const sessions = ensureVisibleSession([archived, visible], () => replacement);
+    expect(sessions).toEqual([archived, visible]);
+    expect(resolveVisibleSession(sessions)?.id).toBe(visible.id);
+    expect(resolveVisibleSession(sessions, archived.id)?.id).toBe(visible.id);
+  });
+
+  it("全部归档时保留旧记录并选中新会话", () => {
+    const sessions = ensureVisibleSession([archived], () => replacement);
+    expect(sessions).toEqual([replacement, archived]);
+    expect(resolveVisibleSession(sessions)?.id).toBe(replacement.id);
   });
 });

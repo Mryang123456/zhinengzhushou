@@ -4,6 +4,15 @@ export function createSessionTitle(now = new Date(), suffix = crypto.randomUUID(
   return `会话-${now.toISOString().replace(/[:.]/g, "-")}-${suffix}`;
 }
 
+export function ensureVisibleSession(sessions: Session[], create: () => Session): Session[] {
+  return sessions.some((session) => !session.archived) ? sessions : [create(), ...sessions];
+}
+
+export function resolveVisibleSession(sessions: Session[], selectedId?: string): Session | undefined {
+  return sessions.find((session) => session.id === selectedId && !session.archived)
+    ?? sessions.find((session) => !session.archived);
+}
+
 export function archiveSessionState(sessions: Session[], activeId: string, archivedId: string, replacement: Session) {
   const archived = sessions.map((session) => session.id === archivedId ? { ...session, archived: true, updatedAt: Date.now() } : session);
   const available = archived.filter((session) => !session.archived);

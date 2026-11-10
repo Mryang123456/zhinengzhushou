@@ -164,7 +164,7 @@ KNOWLEDGE_DATABASE_URL=postgresql://agent:你的密码@localhost:5432/agent_memo
 # 可选：只有设置后才调用付费 Embedding；未设置时使用关键词检索回退。
 KNOWLEDGE_EMBEDDING_PROVIDER=openai
 KNOWLEDGE_EMBEDDING_MODEL=text-embedding-3-small
-# 检索结果的最低相关度；低于该值的片段不会交给模型。
+# 仅用于向量候选的原始余弦相似度门槛，范围 [-1, 1]。
 KNOWLEDGE_MIN_SCORE=0.22
 ```
 
@@ -174,7 +174,23 @@ KNOWLEDGE_MIN_SCORE=0.22
 python -m backend.app.knowledge.cli .\资料\产品说明.md --owner-id 开发者A --scope private
 ```
 
-导入时必须指定所属用户或租户；`private` 仅所属用户可检索，`shared` 才允许其他用户检索。导入会切分文本、记录来源并按配置生成向量。Agent 仅在配置知识库地址后暴露 `search_knowledge_base` 工具，且该工具归属于“联网调研”Skill 的白名单；检索结果会过滤低相关度片段，并始终返回 `knowledge://文档ID#片段` 引用。文档内容被视为不可信资料，不能改变系统指令。
+导入时必须指定所属用户或租户；`private` 仅所属用户可检索，`shared` 才允许其他用户检索。导入会切分文本、记录来源并按配置生成向量。Agent 仅在配置知识库地址后暴露 `search_knowledge_base` 工具，且该工具归属于“联网调研”Skill 的白名单。检索将向量和全文候选融合、重排，保留达到余弦门槛或全文命中的候选，再截取 Top-K。结果携带 `knowledge://文档ID#片段` 引用，文档内容按不可信资料处理。
+
+### RAG 检索评测
+
+CI 使用合成候选回归集，覆盖语义改写、阈值过滤、全文召回与无证据场景。报告包含候选池召回率、过滤前重排 Recall@K、最终 Recall@K、Precision@K、MRR@K、NDCG@K 和无证据样本正确返回空结果的比例。Precision@K 固定以 K 为分母，检索指标只对有标注证据的样本取平均。
+
+```powershell
+python -m backend.evals.rag backend/evals/rag_regression.jsonl --mode fixture -k 1 --min-recall 1 --min-no-evidence-accuracy 1
+```
+
+真实评测使用已导入测试语料的知识库和标注 JSONL。每行包括 `id`、`question`、`user_id` 和 `relevant_chunks`。引用 ID 应与该测试库快照一致，无证据样本的 `relevant_chunks` 为空数组。连接可使用只读账号，评测过程不初始化表。启用向量检索时，评测会按现有配置请求 Embedding。
+
+```powershell
+python -m backend.evals.rag .\rag_golden.jsonl --mode live -k 5 --require-hybrid
+```
+
+按业务基线设置 `--min-recall` 与 `--min-no-evidence-accuracy`，低于门槛时命令退出码为 1。合成回归结果用于验证排序与过滤逻辑，真实检索质量以业务评测集的报告为准。
 
 ## 服务端基础防护
 
@@ -234,6 +250,8 @@ START → agent → tools? → agent → END
 ```
 
 未配置 `CHECKPOINT_DATABASE_URL` 时由 `MemorySaver` 负责进程内 checkpoint；配置 PostgreSQL 地址后，自动使用数据库型 checkpointer 并跨进程恢复。请使用稳定的 `user_id` 与 `thread_id`。
+
+Web 请求按用户和会话串行写入 Checkpoint。等待上一轮完成的默认上限为 120 秒，可用 `AGENT_THREAD_QUEUE_TIMEOUT_SECONDS` 调整。使用 PostgreSQL 时，服务会在同一连接上持有会话级咨询锁并写入 Checkpoint。数据库地址应使用直连或会话池模式。
 
 默认模型由 `.env.local` 的 `MODEL_PROVIDER=openai` 与 `MODEL_NAME=gpt-4.1-mini` 决定。
 

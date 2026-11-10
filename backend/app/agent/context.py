@@ -6,7 +6,9 @@ Checkpoint 保留完整审计轨迹；本模块只决定哪一部分可被再次
 
 from __future__ import annotations
 
+import json
 import os
+from collections import Counter
 from collections.abc import Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -25,6 +27,22 @@ def estimate_tokens(text: str) -> int:
     chinese = sum("\u4e00" <= char <= "\u9fff" for char in text)
     other = max(0, len(text) - chinese)
     return max(1, (chinese + 1) // 2 + (other + 3) // 4)
+
+
+def clip_to_tokens(text: str, budget: int, *, from_end: bool = False) -> str:
+    if budget <= 0:
+        return ""
+    if estimate_tokens(text) <= budget:
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        length = (low + high + 1) // 2
+        candidate = text[-length:] if from_end else text[:length]
+        if estimate_tokens(candidate) <= budget:
+            low = length
+        else:
+            high = length - 1
+    return (text[-low:] if from_end else text[:low]) if low else ""
 
 
 def message_text(message: BaseMessage) -> str:
@@ -47,8 +65,14 @@ def message_role(message: BaseMessage) -> str:
 
 
 def messages_token_count(messages: Sequence[BaseMessage]) -> int:
-    # 消息边界、角色和工具调用元数据也会占用少量 token。
-    return sum(estimate_tokens(message_text(message)) + 12 for message in messages)
+    total = 0
+    for message in messages:
+        total += estimate_tokens(message_text(message)) + 12
+        if isinstance(message, AIMessage) and message.tool_calls:
+            total += estimate_tokens(json.dumps(message.tool_calls, ensure_ascii=False))
+        elif isinstance(message, ToolMessage):
+            total += estimate_tokens(message.tool_call_id + (message.name or ""))
+    return total
 
 
 def split_turns(messages: Sequence[BaseMessage]) -> list[list[BaseMessage]]:
@@ -65,19 +89,39 @@ def split_turns(messages: Sequence[BaseMessage]) -> list[list[BaseMessage]]:
     return turns
 
 
-def recent_window(messages: Sequence[BaseMessage], budget: int, minimum_turns: int = 2) -> list[BaseMessage]:
-    """在预算内保留最近完整回合；至少留下最后一个提问，宁可不带旧上下文。"""
+def incomplete_tool_message_ids(messages: Sequence[BaseMessage]) -> set[str]:
+    """定位缺少结果的工具批次及没有对应调用的孤立结果。"""
+    discarded = set()
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        index += 1
+        if isinstance(message, AIMessage) and message.tool_calls:
+            start = index
+            while index < len(messages) and isinstance(messages[index], ToolMessage):
+                index += 1
+            results = messages[start:index]
+            requested = Counter(call["id"] for call in message.tool_calls)
+            if None in requested or len(requested) != len(message.tool_calls) or requested != Counter(
+                result.tool_call_id for result in results
+            ):
+                discarded.update(item.id for item in [message, *results] if item.id)
+        elif isinstance(message, ToolMessage) and message.id:
+            discarded.add(message.id)
+    return discarded
+
+
+def recent_window(messages: Sequence[BaseMessage], budget: int) -> list[BaseMessage]:
+    """从最近回合起选择预算内的连续完整历史。"""
     turns = split_turns(messages)
     selected: list[list[BaseMessage]] = []
     used = 0
     for turn in reversed(turns):
         cost = messages_token_count(turn)
-        if selected and used + cost > budget and len(selected) >= minimum_turns:
+        if used + cost > budget:
             break
         selected.append(turn)
         used += cost
-        if used >= budget and len(selected) >= minimum_turns:
-            break
     return [message for turn in reversed(selected) for message in turn]
 
 
@@ -91,7 +135,9 @@ def history_for_summary(messages: Sequence[BaseMessage], max_chars: int = 24_000
             continue
         row = f"{message_role(message)}：{text}"
         if len(row) > remaining:
-            rows.append("…[较早内容已截断] " + row[-max(0, remaining - 14):])
+            marker = "…[较早内容已截断] "
+            if remaining > len(marker):
+                rows.append(marker + row[-(remaining - len(marker)):])
             break
         rows.append(row)
         remaining -= len(row)
