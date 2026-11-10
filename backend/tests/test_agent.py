@@ -1052,7 +1052,32 @@ class CalculatorTests(unittest.TestCase):
         fused = reciprocal_rank_fusion([[{"document_id": 1, "chunk": 0, "content": "天气", "score": 1}], [{"document_id": 1, "chunk": 0, "content": "天气", "score": 1}]])
         self.assertEqual(fused[0]["document_id"], 1)
         self.assertIn("天气", lexical_terms("今天天气怎么样"))
-        self.assertEqual(rerank("北京天气", [{"content": "北京今日天气晴朗", "score": 0.1}])[0]["score"], 0.26)
+        self.assertAlmostEqual(rerank("北京天气", [{"content": "北京今日天气晴朗", "score": 0.1}])[0]["score"], 0.1 + 0.08 * 2 / 3)
+
+    def test_knowledge_reimport_preserves_old_chunks_and_reuses_identical_version(self):
+        import hashlib
+
+        store = KnowledgeStore.__new__(KnowledgeStore)
+        store._connect = MagicMock()
+        cursor = store._connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+        old_text, new_text = "报销额度为 500 元。", "报销额度为 600 元。"
+        old_hash, new_hash = (hashlib.sha256(text.encode("utf-8")).hexdigest() for text in (old_text, new_text))
+        cursor.fetchone.side_effect = [None, (7,), (7, old_hash), (8,), (8, new_hash)]
+        cursor.fetchall.return_value = [(0, new_text)]
+
+        with patch("backend.app.knowledge.store.embed_texts", return_value=[[0.3]]):
+            self.assertEqual(store.ingest("制度", old_text, "finance"), 1)
+            self.assertEqual(store.ingest("制度", new_text, "finance"), 1)
+            self.assertEqual(store.ingest("制度", new_text, "finance", "shared"), 1)
+
+        statements = [call.args for call in cursor.execute.call_args_list]
+        self.assertEqual([args for sql, args in statements if "INSERT INTO knowledge_chunks" in sql], [
+            (7, 0, old_text, "[0.3]"), (8, 0, new_text, "[0.3]"),
+        ])
+        self.assertEqual([args for sql, args in statements if "status = 'archived'" in sql], [(7,)])
+        self.assertEqual([args for sql, args in statements if "SET metadata" in sql], [('{}', "shared", 8)])
+        self.assertEqual(sum("pg_advisory_xact_lock" in sql for sql, _ in statements), 3)
+        self.assertFalse(any("DELETE FROM knowledge_chunks" in sql for sql, _ in statements))
 
     def test_knowledge_ingestion_rejects_oversized_or_unsupported_files(self):
         env = __import__("os").environ

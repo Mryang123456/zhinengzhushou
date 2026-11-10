@@ -14,7 +14,9 @@ ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL 
 ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS access_scope TEXT NOT NULL DEFAULT 'private';
 ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
 ALTER TABLE knowledge_documents DROP CONSTRAINT IF EXISTS knowledge_documents_source_key;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_documents_owner_source ON knowledge_documents(owner_id, source);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_documents_active_owner_source
+    ON knowledge_documents(owner_id, source) WHERE status = 'active';
+DROP INDEX IF EXISTS idx_knowledge_documents_owner_source;
 CREATE TABLE IF NOT EXISTS knowledge_chunks (
     id BIGSERIAL PRIMARY KEY,
     document_id BIGINT NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,

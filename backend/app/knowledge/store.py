@@ -57,13 +57,51 @@ class KnowledgeStore:
             vectors = embed_texts(chunks)
         except EmbeddingUnavailable:
             vectors = [None] * len(chunks)
+        metadata_json = json.dumps(metadata or {})
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute("INSERT INTO knowledge_documents(source, content_hash, metadata, owner_id, access_scope) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (owner_id, source) DO UPDATE SET content_hash = EXCLUDED.content_hash, metadata = EXCLUDED.metadata, access_scope = EXCLUDED.access_scope, status = 'active', updated_at = NOW() RETURNING id", (source, digest, json.dumps(metadata or {}), owner_id, access_scope))
-            document_id = cursor.fetchone()[0]
-            cursor.execute("DELETE FROM knowledge_chunks WHERE document_id = %s", (document_id,))
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (json.dumps(["knowledge-import", owner_id, source]),))
+            cursor.execute(
+                "SELECT id, content_hash FROM knowledge_documents WHERE owner_id = %s AND source = %s AND status = 'active'",
+                (owner_id, source),
+            )
+            previous = cursor.fetchone()
+            same_version = False
+            if previous and previous[1] == digest:
+                cursor.execute(
+                    "SELECT chunk_index, content FROM knowledge_chunks WHERE document_id = %s ORDER BY chunk_index",
+                    (previous[0],),
+                )
+                same_version = cursor.fetchall() == list(enumerate(chunks))
+
+            if same_version:
+                document_id = previous[0]
+                cursor.execute(
+                    "UPDATE knowledge_documents SET metadata = %s, access_scope = %s, updated_at = NOW() WHERE id = %s",
+                    (metadata_json, access_scope, document_id),
+                )
+            else:
+                if previous:
+                    cursor.execute("UPDATE knowledge_documents SET status = 'archived', updated_at = NOW() WHERE id = %s", (previous[0],))
+                    # 历史片段保留原文和引用，移出只服务当前版本的向量索引。
+                    cursor.execute("UPDATE knowledge_chunks SET embedding = NULL WHERE document_id = %s AND embedding IS NOT NULL", (previous[0],))
+                cursor.execute(
+                    "INSERT INTO knowledge_documents(source, content_hash, metadata, owner_id, access_scope) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                    (source, digest, metadata_json, owner_id, access_scope),
+                )
+                document_id = cursor.fetchone()[0]
+
             for index, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True)):
                 vector_text = "[" + ",".join(map(str, vector)) + "]" if vector else None
-                cursor.execute("INSERT INTO knowledge_chunks(document_id, chunk_index, content, embedding) VALUES (%s, %s, %s, %s::vector)", (document_id, index, chunk, vector_text))
+                if not same_version:
+                    cursor.execute(
+                        "INSERT INTO knowledge_chunks(document_id, chunk_index, content, embedding) VALUES (%s, %s, %s, %s::vector)",
+                        (document_id, index, chunk, vector_text),
+                    )
+                elif vector_text is not None:
+                    cursor.execute(
+                        "UPDATE knowledge_chunks SET embedding = %s::vector WHERE document_id = %s AND chunk_index = %s",
+                        (vector_text, document_id, index),
+                    )
         return len(chunks)
 
     def search(self, query: str, user_id: str, limit: int = 5, minimum_score: float | None = None) -> list[dict]:
@@ -87,6 +125,8 @@ class KnowledgeStore:
         with self._connect() as connection, connection.cursor() as cursor:
             vector_rows = None
             if vector:
+                # 两路召回读取同一快照，避免导入新版本时混合新旧片段。
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 vector_text = "[" + ",".join(map(str, vector)) + "]"
                 cursor.execute("SELECT d.id, d.source, c.chunk_index, c.content, 1 - (c.embedding <=> %s::vector) AS score FROM knowledge_chunks c JOIN knowledge_documents d ON d.id=c.document_id WHERE c.embedding IS NOT NULL AND d.status = 'active' AND (d.owner_id = %s OR d.access_scope = 'shared') ORDER BY c.embedding <=> %s::vector LIMIT %s", (vector_text, user_id, vector_text, candidate_limit))
                 vector_rows = [_candidate(row) for row in cursor.fetchall()]

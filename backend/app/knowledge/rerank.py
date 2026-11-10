@@ -3,6 +3,11 @@
 import re
 from dataclasses import dataclass
 
+RRF_K = 60
+RRF_WEIGHT = 0.10
+LEXICAL_WEIGHT = 0.08
+MIN_KEYWORD_COVERAGE = 0.50
+
 
 def lexical_terms(text: str) -> set[str]:
     """中英文混合分词：中文加入二元词，避免整句中文只被当作一个词。"""
@@ -17,7 +22,7 @@ def lexical_terms(text: str) -> set[str]:
     return words
 
 
-def reciprocal_rank_fusion(rankings: list[list[dict]], limit: int = 20, k: int = 60) -> list[dict]:
+def reciprocal_rank_fusion(rankings: list[list[dict]], limit: int = 20, k: int = RRF_K) -> list[dict]:
     """融合向量与关键词候选，避免任一召回通道独占结果。"""
     merged: dict[tuple, dict] = {}
     for ranking in rankings:
@@ -27,12 +32,17 @@ def reciprocal_rank_fusion(rankings: list[list[dict]], limit: int = 20, k: int =
             item["score"] += 1 / (k + position)
     return sorted(merged.values(), key=lambda row: row["score"], reverse=True)[:limit]
 
+
+def _coverage(terms: set[str], text: str) -> float:
+    return len(terms & lexical_terms(text)) / len(terms) if terms else 0.0
+
+
 def rerank(query: str, rows: list[dict], limit: int = 5) -> list[dict]:
     terms = lexical_terms(query)
-    scored = []
-    for row in rows:
-        overlap = len(terms & lexical_terms(row["content"]))
-        scored.append({**row, "score": round(float(row["score"]) + 0.08 * overlap, 4)})
+    scored = [
+        {**row, "score": float(row["score"]) + LEXICAL_WEIGHT * _coverage(terms, row["content"])}
+        for row in rows
+    ]
     return sorted(scored, key=lambda row: row["score"], reverse=True)[:limit]
 
 
@@ -52,14 +62,26 @@ def rank_candidates(
     vectors = {
         row["citation"]: row["score"] for row in (vector_rows or [])
     }
-    keyword_hits = {row["citation"] for row in keyword_rows}
+    terms = lexical_terms(query)
+    keyword_hits = {
+        row["citation"] for row in keyword_rows
+        if row["score"] > 0 and _coverage(terms, row["content"]) >= MIN_KEYWORD_COVERAGE
+    }
     if vector_rows is None:
         candidates = keyword_rows
     else:
         candidates = reciprocal_rank_fusion(
             [vector_rows, keyword_rows], limit=len(vector_rows) + len(keyword_rows)
         )
-    ranked = rerank(query, candidates, len(candidates))
+    scoring_rows = candidates
+    if vector_rows is not None:
+        # 两路 RRF 的最大值是 2/(k+1)，归一化后作为有限的排序加分。
+        maximum_rrf = 2 / (RRF_K + 1)
+        scoring_rows = [
+            {**row, "score": vectors.get(row["citation"], 0.0) + RRF_WEIGHT * row["score"] / maximum_rrf}
+            for row in candidates
+        ]
+    ranked = rerank(query, scoring_rows, len(scoring_rows))
     eligible = [
         row for row in ranked
         if row["citation"] in keyword_hits

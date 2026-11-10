@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_documents_owner_source ON knowledge_documents(owner_id, source);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_documents_active_owner_source
+    ON knowledge_documents(owner_id, source) WHERE status = 'active';
 CREATE TABLE IF NOT EXISTS knowledge_chunks (
     id BIGSERIAL PRIMARY KEY, document_id BIGINT NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL, content TEXT NOT NULL, embedding vector(1536), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(document_id, chunk_index)
