@@ -3,6 +3,7 @@ import type { ComponentRef } from "react";
 import { Sender } from "@ant-design/x";
 import { Button } from "antd";
 import { Database, Paperclip, Send, Wrench, X } from "lucide-react";
+import "./style.css";
 
 type Props = {
   value: string;

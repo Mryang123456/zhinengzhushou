@@ -1,33 +1,24 @@
-"""基于 LangChain 与 LangGraph 的基础工具型智能体，使用内存检查点保存会话。"""
+"""组装智能体的意图、工具、模型和回答校验工作流。"""
 
 from __future__ import annotations
 
-import argparse
 import asyncio
-import ast
 import json
 import logging
-import math
-import operator
 import os
-from contextlib import aclosing, asynccontextmanager
 from pathlib import Path
-from typing import NotRequired, TypedDict
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from typing import NotRequired
 from uuid import uuid4
 
-from ddgs import DDGS
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
-from langchain_core.tools import ToolException, tool
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.tools import ToolException
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from backend.app.config import ENV_FILE, MCP_APPROVAL_DB_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE, SKILLS_DIR
 from backend.app.agent.context import (
     clip_to_tokens,
     context_budget,
@@ -42,14 +33,42 @@ from backend.app.agent.context import (
     summary_prompt,
 )
 from backend.app.agent.tool_retrieval import retrieve_tool_candidates
-from backend.app.mcp.approval import create_approval_store
-from backend.app.mcp.governance import RISK_ORDER, ToolPolicyError, audit, invoke_governed, is_registered_tool, load_governance, risk_for_tool, sanitize_output, validate_mcp_servers, validate_tool_arguments
-from backend.app.memory.store import MemoryStore, create_memory_store
-from backend.app.models.factory import ModelConfigurationError, create_chat_model, ensure_model_ready, get_model_settings
-from backend.app.skills.registry import Skill, format_skill_context, load_skills, match_skills, select_tool_names, select_top_tool_candidates
+from backend.app.agent.tools import (
+    TOOLS,
+    create_knowledge_tools,
+    create_memory_tools,
+    create_skill_tools,
+    format_memory_context,
+)
+from backend.app.agent.tools import calculator as calculator
+from backend.app.agent.tools import evaluate_expression as evaluate_expression
+from backend.app.agent.tools import get_weather as get_weather
+from backend.app.agent.tools import weather_code_description as weather_code_description
+from backend.app.agent.tools import web_search as web_search
+from backend.app.agent.turns import ask as ask
+from backend.app.agent.turns import checkpoint_config as checkpoint_config
+from backend.app.agent.turns import checkpoint_scope as checkpoint_scope
+from backend.app.agent.turns import stream_events as stream_events
+from backend.app.config import ENV_FILE, MCP_APPROVAL_DB_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE, SKILLS_DIR
 from backend.app.intent.policy import classify
+from backend.app.mcp.approval import create_approval_store
+from backend.app.mcp.governance import (
+    RISK_ORDER,
+    ToolPolicyError,
+    audit,
+    invoke_governed,
+    is_registered_tool,
+    load_governance,
+    load_mcp_connections,
+    risk_for_tool,
+    sanitize_output,
+    validate_tool_arguments,
+)
+from backend.app.memory.store import create_memory_store
+from backend.app.models.factory import create_chat_model
 from backend.app.quality.validator import INTERNAL_FRESHNESS_TERMS, validate_answer
-from backend.app.knowledge.store import KnowledgeStore, format_untrusted_evidence
+from backend.app.skills.registry import format_skill_context, load_skills, select_tool_names, select_top_tool_candidates
+
 
 load_dotenv(ENV_FILE)
 logger = logging.getLogger(__name__)
@@ -74,116 +93,6 @@ class AgentState(MessagesState):
     retry: NotRequired[bool]
     context_limit_reached: NotRequired[bool]
 
-_BINARY_OPERATORS = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.FloorDiv: operator.floordiv,
-    ast.Mod: operator.mod,
-    ast.Pow: operator.pow,
-}
-_UNARY_OPERATORS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
-
-
-def evaluate_expression(expression: str) -> int | float:
-    """计算基础算术表达式；禁止名称、函数调用和属性访问。"""
-
-    def visit(node: ast.AST) -> int | float:
-        if isinstance(node, ast.Expression):
-            return visit(node.body)
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return node.value
-        if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
-            return _BINARY_OPERATORS[type(node.op)](visit(node.left), visit(node.right))
-        if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPERATORS:
-            return _UNARY_OPERATORS[type(node.op)](visit(node.operand))
-        raise ValueError("只允许数字、+、-、*、/、//、%、** 和括号。")
-
-    if len(expression) > 200:
-        raise ValueError("表达式过长。")
-    return visit(ast.parse(expression, mode="eval"))
-
-
-@tool
-def calculator(expression: str) -> str:
-    """计算基础算术表达式，例如“(17 + 3) * 2”。"""
-    try:
-        result = evaluate_expression(expression)
-        if not isinstance(result, (int, float)) or (isinstance(result, float) and not math.isfinite(result)):
-            raise ToolException("计算结果超出支持的实数范围。")
-        return str(result)
-    except ZeroDivisionError as error:
-        raise ToolException("计算失败：除数不能为零。") from error
-    except (SyntaxError, ValueError, ArithmeticError) as error:
-        raise ToolException("计算失败：表达式无效或超出支持的范围。") from error
-
-
-def _get_json(url: str) -> dict:
-    request = Request(url, headers={"User-Agent": "langgraph-agent/1.0"})
-    with urlopen(request, timeout=10) as response:  # noqa: S310 - 固定的 HTTPS API 地址
-        return json.load(response)
-
-
-def weather_code_description(code: int) -> str:
-    descriptions = {
-        0: "晴朗", 1: "大致晴朗", 2: "局部多云", 3: "阴天", 45: "有雾", 48: "雾凇",
-        51: "毛毛雨", 53: "毛毛雨", 55: "强毛毛雨", 61: "小雨", 63: "中雨",
-        65: "大雨", 71: "小雪", 73: "中雪", 75: "大雪", 80: "阵雨",
-        81: "中等阵雨", 82: "强阵雨", 95: "雷暴", 96: "伴冰雹的雷暴", 99: "强冰雹雷暴",
-    }
-    return descriptions.get(code, f"天气代码 {code}")
-
-
-@tool
-def get_weather(location: str) -> str:
-    """查询城市或地点的当前天气，例如“新加坡”或“北京”。"""
-    try:
-        geocode_url = "https://geocoding-api.open-meteo.com/v1/search?" + urlencode(
-            {"name": location, "count": 1, "language": "zh", "format": "json"}
-        )
-        matches = _get_json(geocode_url).get("results", [])
-        if not matches:
-            raise ToolException("未找到指定地点，请检查城市名称。")
-        place = matches[0]
-        forecast_url = "https://api.open-meteo.com/v1/forecast?" + urlencode(
-            {
-                "latitude": place["latitude"],
-                "longitude": place["longitude"],
-                "current": "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m",
-                "timezone": "auto",
-            }
-        )
-        current = _get_json(forecast_url)["current"]
-        return (
-            f"{place['name']}当前天气：{weather_code_description(current['weather_code'])}；"
-            f"气温 {current['temperature_2m']}°C，体感 {current['apparent_temperature']}°C，"
-            f"湿度 {current['relative_humidity_2m']}%，风速 {current['wind_speed_10m']} km/h，"
-            f"降水 {current['precipitation']} mm。"
-        )
-    except (KeyError, OSError, TimeoutError, ValueError) as error:
-        raise ToolException("天气服务暂未返回可用数据。") from error
-
-
-@tool
-def web_search(query: str, max_results: int = 5) -> str:
-    """检索公开网页中的最新信息，返回标题、摘要和链接。"""
-    try:
-        limit = max(1, min(max_results, 8))
-        results = list(DDGS().text(query, max_results=limit))
-    except Exception as error:
-        raise ToolException("联网搜索失败，请稍后重试。") from error
-    results = [item for item in results if str(item.get("href", "")).startswith(("http://", "https://"))]
-    if not results:
-        raise ToolException("联网搜索没有返回可引用的结果。")
-    return json.dumps([
-        {"title": item.get("title", ""), "body": item.get("body", ""), "href": item["href"]}
-        for item in results
-    ], ensure_ascii=False)
-
-
-TOOLS = [calculator, get_weather, web_search]
-
 
 def content_to_text(content: object) -> str:
     """将模型的文本或内容块统一转换为可显示文本。"""
@@ -195,123 +104,6 @@ def content_to_text(content: object) -> str:
             for block in content
         )
     return str(content or "")
-
-
-def is_billing_error(error: Exception) -> bool:
-    """识别 OpenAI 的常见计费或额度错误文案。"""
-    message = str(error).lower()
-    return any(
-        phrase in message
-        for phrase in (
-            "account is not active",
-            "no credits remaining",
-            "insufficient_quota",
-            "credit_balance_exhausted",
-        )
-    )
-
-
-def format_memory_context(memories: list[tuple[int, str]]) -> str:
-    if not memories:
-        return "（暂无已保存的长期记忆。）"
-    return "\n".join(f"- [{memory_id}] {content}" for memory_id, content in memories)
-
-
-def create_memory_tools(memory_store: MemoryStore, user_id: str):
-    """为当前用户创建受隔离的长期记忆工具。"""
-
-    @tool
-    def remember_memory(content: str) -> str:
-        """仅当用户明确要求“记住”某条非敏感信息时，保存为长期记忆。"""
-        try:
-            memory_id = memory_store.remember(user_id, content)
-            return f"已保存长期记忆，编号为 {memory_id}。"
-        except ValueError as error:
-            return f"无法保存记忆：{error}"
-
-    @tool
-    def recall_memory(query: str) -> str:
-        """检索当前用户已保存的长期记忆。"""
-        memories = memory_store.search(user_id, query)
-        return format_memory_context(memories)
-
-    @tool
-    def forget_memory(memory_id: int) -> str:
-        """仅当用户明确要求删除时，删除指定编号的一条长期记忆。"""
-        if memory_store.forget(user_id, memory_id):
-            return f"已删除编号为 {memory_id} 的长期记忆。"
-        return f"未找到编号为 {memory_id} 的长期记忆，或该记忆不属于当前用户。"
-
-    return [remember_memory, recall_memory, forget_memory]
-
-
-def create_skill_tools(skills: list[Skill]):
-    """提供可审计的 Skill 清单；Skill 指令只能由本地目录加载。"""
-    @tool
-    def list_skills() -> str:
-        """查看当前智能体可用的专用技能及其用途。"""
-        return "\n".join(f"- {skill.name}：{skill.description}" for skill in skills)
-
-    return [list_skills]
-
-
-def create_knowledge_tools(database_url: str | None, user_id: str):
-    """仅在显式配置知识库数据库时暴露检索工具。"""
-    if not database_url:
-        return []
-    store = KnowledgeStore(database_url)
-
-    @tool
-    def search_knowledge_base(query: str) -> str:
-        """检索已导入的内部知识库，返回文本片段及其文档来源。"""
-        rows = store.search(query, user_id)
-        if not rows:
-            raise ToolException("知识库中未找到可引用且你有权限访问的资料。")
-        return "\n\n".join(format_untrusted_evidence(row) for row in rows)
-
-    return [search_knowledge_base]
-
-
-def load_mcp_connections(config_path: Path) -> dict:
-    """加载显式 MCP 服务配置；绝不从聊天输入中接受服务启动命令。"""
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        connections = config["mcpServers"]
-    except (OSError, KeyError, json.JSONDecodeError) as error:
-        raise ValueError(f"MCP 配置无效：{config_path}；原因：{error}") from error
-    if not isinstance(connections, dict) or not connections:
-        raise ValueError("mcpServers 必须是非空对象。")
-    validate_mcp_servers(config)
-    allowed_servers = set(config.get("mcpGovernance", {}).get("allowedServers", []))
-    unexpected = set(connections) - allowed_servers
-    if unexpected:
-        raise ValueError(f"MCP 配置包含未注册服务：{', '.join(sorted(unexpected))}")
-    return connections
-
-
-@asynccontextmanager
-async def checkpoint_scope(database_url: str | None = None):
-    """提供检查点存储；配置 PostgreSQL 时，任务状态可跨进程恢复。"""
-    if not database_url:
-        yield MemorySaver()
-        return
-
-    try:
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-        from psycopg_pool import AsyncConnectionPool
-    except ImportError as error:
-        raise RuntimeError(
-            "缺少 PostgreSQL 检查点依赖，请重新安装 requirements.txt。"
-        ) from error
-
-    async with AsyncConnectionPool(
-        conninfo=database_url,
-        kwargs={"autocommit": True, "prepare_threshold": 0},
-        open=False,
-    ) as pool:
-        checkpointer = AsyncPostgresSaver(pool)
-        await checkpointer.setup()
-        yield checkpointer
 
 
 async def build_agent(
@@ -690,171 +482,11 @@ async def continue_after_approved_mcp(question: str, tool_name: str, tool_result
     return answer if validation["ok"] else validation["replacement"]
 
 
-def checkpoint_config(thread_id: str, user_id: str = "default") -> dict:
-    """生成按用户隔离的检查点键，防止不同用户共享同一会话状态。"""
-    return {"configurable": {"thread_id": f"{user_id}:{thread_id}"}}
-
-
-async def ask(app, question: str, thread_id: str, user_id: str = "default") -> str:
-    """执行一个回合；重用 thread_id 可在当前进程内保持对话。"""
-    result = await app.ainvoke(
-        {"messages": [HumanMessage(question)], "retry": False},
-        config=checkpoint_config(thread_id, user_id),
-    )
-    return result["messages"][-1].content
-
-
-async def stream_events(
-    app, question: str, thread_id: str, user_id: str = "default", *,
-    message_id: str | None = None, retry: bool = False,
-):
-    """逐步产出 token、工具状态和最终答案，供命令行或 SSE 接口复用。"""
-    config = checkpoint_config(thread_id, user_id)
-    stable_id = f"web:{message_id}" if message_id is not None else None
-    question_message = HumanMessage(content=question, id=stable_id)
-    messages: list[BaseMessage] = [question_message]
-    if stable_id is not None:
-        snapshot = await app.aget_state(config)
-        history = snapshot.values.get("messages", [])
-        matching_index = next((i for i, message in enumerate(history) if message.id == stable_id), None)
-        latest_question_index = next(
-            (i for i in range(len(history) - 1, -1, -1) if isinstance(history[i], HumanMessage)),
-            None,
-        )
-        if matching_index is not None:
-            if not retry or matching_index != latest_question_index or history[matching_index].content != question:
-                yield {"type": "error", "message": "该问题已提交或不是当前会话的最后一轮，请发送新问题。", "retryable": False}
-                return
-            # 按 ID 更新原问题，同时清理这次尝试产生的草稿与工具调用记录。
-            messages.extend(RemoveMessage(id=message.id) for message in history[matching_index + 1:] if message.id)
-        elif retry and latest_question_index is not None:
-            latest = history[latest_question_index]
-            if latest.id and not latest.id.startswith("web:") and latest.content == question:
-                # 旧版客户端的最后一轮没有前端 ID，将它一次性换成新 ID。
-                messages = [
-                    RemoveMessage(id=message.id)
-                    for message in history[latest_question_index:] if message.id
-                ] + [question_message]
-    final_answer = ""
-    async with aclosing(app.astream(
-        {"messages": messages, "retry": retry},
-        config=config,
-        stream_mode=["custom", "updates"],
-    )) as events:
-        async for mode, payload in events:
-            if mode == "custom":
-                if payload.get("type") == "token":
-                    final_answer += payload.get("content", "")
-                yield payload
-                continue
-            tool_update = payload.get("tools")
-            if isinstance(tool_update, dict):
-                tool_names = [getattr(message, "name", "工具") for message in tool_update.get("messages", [])]
-                yield {"type": "tool_end", "tools": tool_names}
-    yield {"type": "done", "content": final_answer}
-
-
-async def answer_or_exit(app, question: str, thread_id: str, user_id: str = "default") -> str:
-    """将常见账户配置失败转换为可执行的命令行提示。"""
-    try:
-        return await ask(app, question, thread_id, user_id)
-    except Exception as error:
-        if is_billing_error(error):
-            raise SystemExit(
-                "OpenAI API 项目尚未启用。请先在 OpenAI Platform 启用 API 计费后重试。"
-            ) from error
-        raise
-
-
-async def run_cli(args: argparse.Namespace) -> None:
-    mcp_config_path = None if args.no_mcp else Path(args.mcp_config)
-    memory_db_path = None if args.no_memory else Path(args.memory_db)
-    checkpoint_database_url = args.checkpoint_database_url or os.getenv("CHECKPOINT_DATABASE_URL")
-    async with checkpoint_scope(checkpoint_database_url) as checkpointer:
-        app = await build_agent(
-            mcp_config_path,
-            args.user_id,
-            memory_db_path,
-            args.memory_database_url or os.getenv("MEMORY_DATABASE_URL"),
-            checkpointer,
-        )
-        if args.once:
-            if args.no_stream:
-                print(await answer_or_exit(app, args.once, args.thread_id, args.user_id))
-            else:
-                await print_stream(app, args.once, args.thread_id, args.user_id)
-            return
-
-        print("智能体已就绪。输入 /quit 退出。")
-        while True:
-            question = input("> ").strip()
-            if question in {"/quit", "/exit"}:
-                return
-            if question:
-                if args.no_stream:
-                    print(await answer_or_exit(app, question, args.thread_id, args.user_id))
-                else:
-                    await print_stream(app, question, args.thread_id, args.user_id)
-
-
-async def print_stream(app, question: str, thread_id: str, user_id: str = "default") -> None:
-    """将流式事件渲染为中文命令行输出。"""
-    printed_token = False
-    try:
-        async for event in stream_events(app, question, thread_id, user_id):
-            if event["type"] == "token":
-                print(event["content"], end="", flush=True)
-                printed_token = True
-            elif event["type"] == "tool_start":
-                print(f"\n[正在调用工具：{'、'.join(event['tools'])}]", flush=True)
-            elif event["type"] == "tool_end":
-                print(f"\n[工具调用完成：{'、'.join(event['tools'])}]", flush=True)
-            elif event["type"] == "done":
-                if not printed_token:
-                    print(event["content"], end="", flush=True)
-                print()
-    except Exception as error:
-        if is_billing_error(error):
-            raise SystemExit(
-                "OpenAI API 项目尚未启用。请先在 OpenAI Platform 启用 API 计费后重试。"
-            ) from error
-        raise
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="基于 LangChain 和 LangGraph 的基础智能体")
-    parser.add_argument("--once", help="执行一个问题后退出")
-    parser.add_argument("--thread-id", default="demo", help="对话检查点标识")
-    parser.add_argument(
-        "--mcp-config",
-        default=str(MCP_CONFIG_FILE),
-        help="显式 MCP 服务配置文件的路径",
-    )
-    parser.add_argument("--no-mcp", action="store_true", help="仅启用内置工具")
-    parser.add_argument("--no-stream", action="store_true", help="关闭命令行流式输出")
-    parser.add_argument("--user-id", default="default", help="长期记忆所属用户标识")
-    parser.add_argument(
-        "--memory-db",
-        default=str(MEMORY_DB_FILE),
-        help="SQLite 长期记忆数据库路径",
-    )
-    parser.add_argument("--no-memory", action="store_true", help="关闭长期记忆功能")
-    parser.add_argument(
-        "--memory-database-url",
-        help="PostgreSQL 长期记忆数据库地址；优先级高于本地 SQLite",
-    )
-    parser.add_argument(
-        "--checkpoint-database-url",
-        help="PostgreSQL 检查点数据库地址；用于跨重启恢复任务状态",
-    )
-    args = parser.parse_args()
+    """兼容直接运行本模块的命令行入口。"""
+    from backend.app.agent.cli import main as cli_main
 
-    try:
-        ensure_model_ready(get_model_settings())
-    except ModelConfigurationError as error:
-        raise SystemExit(f"模型配置错误：{error}") from error
-
-    asyncio.run(run_cli(args))
+    cli_main()
 
 
 if __name__ == "__main__":

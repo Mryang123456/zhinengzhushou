@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChatHeader } from "./components/ChatHeader";
-import { Composer } from "./components/Composer";
-import { ConnectionSettings } from "./components/ConnectionSettings";
-import { MessageList } from "./components/MessageList";
-import { Sidebar } from "./components/Sidebar";
-import { useAgentStream } from "./hooks/useAgentStream";
-import { useConnectionStatus } from "./hooks/useConnectionStatus";
-import { confirmMcpApproval, login } from "./services/agentApi";
-import { loadSessions, saveSessions, sessionStorageKey } from "./services/sessionStorage";
-import { archiveSessionState, createSessionTitle, ensureVisibleSession, resolveVisibleSession } from "./utils/session";
-import type { Message, ProgressStage, Session, StreamEvent } from "./types";
+import { ChatHeader } from "../components/ChatHeader";
+import { Composer } from "../components/Composer";
+import { ConnectionSettings } from "../components/ConnectionSettings";
+import { MessageList } from "../components/MessageList";
+import { Sidebar } from "../components/Sidebar";
+import { useAgentStream } from "../hooks/useAgentStream";
+import { useConnectionStatus } from "../hooks/useConnectionStatus";
+import { confirmMcpApproval, login } from "../services/agentApi";
+import { loadSessions, saveSessions, sessionStorageKey } from "../services/sessionStorage";
+import { archiveSessionState, createSessionTitle, ensureVisibleSession, resolveVisibleSession } from "../utils/session";
+import type { Message, ProgressStage, Session, StreamEvent } from "../types";
+import "./style.css";
 
 const API_URL = import.meta.env.VITE_AGENT_API_URL ?? "http://127.0.0.1:8000";
 const welcome: Message = { id: "welcome", role: "assistant", content: "你好，我是智行助手。你可以让我查询天气、搜索资料、计算表达式，或在需要时明确告诉我“记住这件事”。" };
@@ -62,7 +63,7 @@ function AccountChatLoader(props: AccountChatProps) {
     return () => { active = false; };
   }, [storageKey]);
 
-  if (savedSessions === undefined) return <main className="restore-banner" role="status">正在读取本地会话…</main>;
+  if (savedSessions === undefined) return <main className="app-restore-banner" role="status">正在读取本地会话…</main>;
   return <AccountChat {...props} savedSessions={savedSessions}/>;
 }
 
@@ -186,10 +187,10 @@ function AccountChat({ storageKey, userId, accessToken, apiKey, setApiKey, login
 
   return <main className="app-shell">
     <Sidebar open={sidebarOpen} sessions={sessions.filter((session) => !session.archived).sort((a, b) => b.updatedAt - a.updatedAt)} activeId={activeId} runningIds={runningIds} onNew={createSession} onSelect={selectSession} onArchive={archiveSession} onSettings={() => setShowSettings(true)} onClose={() => setSidebarOpen(false)}/>
-    <section className="chat-panel">
+    <section className="app-chat-panel">
       <ChatHeader sidebarOpen={sidebarOpen} userId={userId} threadTitle={activeSession.title} connectionStatus={connection.status} onThreadTitle={renameSession} onToggleSidebar={() => setSidebarOpen((open) => !open)} onConnection={() => setShowSettings(true)}/>
-      {restored ? <div className="restore-banner">已恢复本地会话。敏感登录令牌不会被保存。<button onClick={() => setRestored(false)}>知道了</button></div> : null}
-      {saveFailed ? <div className="restore-banner" role="alert">浏览器无法保存聊天记录，刷新前请复制需要保留的内容。</div> : null}
+      {restored ? <div className="app-restore-banner">已恢复本地会话。敏感登录令牌不会被保存。<button onClick={() => setRestored(false)}>知道了</button></div> : null}
+      {saveFailed ? <div className="app-restore-banner" role="alert">浏览器无法保存聊天记录，刷新前请复制需要保留的内容。</div> : null}
       <MessageList key={`messages:${activeSession.id}`} messages={activeSession.messages} onConfirmApproval={confirmApproval} retryMessageId={canRetry ? lastReply.id : undefined} onRetry={retryLastReply}/>
       <Composer key={activeSession.id} value={question} isSending={isSending} onChange={(value) => updateDraft(activeSession.id, () => value)} onSubmit={submit} onStop={() => stop(activeSession.id)} onTool={() => appendPrompt("请帮我查资料：")} onMemory={() => appendPrompt("请记住：")}/>
     </section>

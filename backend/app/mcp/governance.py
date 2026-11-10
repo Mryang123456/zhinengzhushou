@@ -47,6 +47,23 @@ def validate_mcp_servers(config: dict) -> None:
             raise ToolPolicyError(f"生产环境要求 MCP 服务 {name} 使用容器沙箱。")
 
 
+def load_mcp_connections(config_path: Path) -> dict:
+    """加载显式 MCP 服务配置；绝不从聊天输入中接受服务启动命令。"""
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        connections = config["mcpServers"]
+    except (OSError, KeyError, json.JSONDecodeError) as error:
+        raise ValueError(f"MCP 配置无效：{config_path}；原因：{error}") from error
+    if not isinstance(connections, dict) or not connections:
+        raise ValueError("mcpServers 必须是非空对象。")
+    validate_mcp_servers(config)
+    allowed_servers = set(config.get("mcpGovernance", {}).get("allowedServers", []))
+    unexpected = set(connections) - allowed_servers
+    if unexpected:
+        raise ValueError(f"MCP 配置包含未注册服务：{', '.join(sorted(unexpected))}")
+    return connections
+
+
 def risk_for_tool(name: str, governance: dict) -> str:
     risks = governance.get("toolRisk", {})
     prefix = max((prefix for prefix in risks if name.startswith(prefix)), key=len, default=None)

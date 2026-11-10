@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Alert, Button, Form, Input, Modal } from "antd";
-import { connectionLabels, type ConnectionStatus } from "../services/agentApi";
+import { connectionLabels, type ConnectionStatus } from "../../services/agentApi";
+import "./style.css";
 
 type Props = {
   apiUrl: string;
@@ -34,7 +35,7 @@ export function ConnectionSettings({ apiUrl, apiKey, userId, connectionStatus, c
   };
 
   return <Modal open title="连接与登录" footer={null} onCancel={onClose} width={440}>
-    <div className="connection-check">
+    <div className="connection-settings-check">
       <span role="status">{connectionLabels[checking ? "checking" : connectionStatus]}</span>
       <Button size="small" loading={checking} onClick={onCheckConnection}>重新检测</Button>
     </div>

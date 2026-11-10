@@ -1,0 +1,51 @@
+body .app-shell {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-shell .app-chat-panel {
+  min-height: 0;
+}
+
+.app-shell .app-restore-banner {
+  margin: 16px auto 0;
+  flex-shrink: 0;
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  background: #fff;
+}
+
+.app-chat-panel {
+  min-width: 0;
+  flex: 1;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-restore-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: min(900px, calc(100% - 56px));
+  margin: 18px auto -18px;
+  padding: 10px 13px;
+  color: #31537f;
+  background: #edf5ff;
+  border: 1px solid #d1e2fb;
+  border-radius: 9px;
+  font-size: 13px;
+}
+
+.app-restore-banner button {
+  border: 0;
+  color: #1e5cff;
+  background: transparent;
+  font-weight: 700;
+}

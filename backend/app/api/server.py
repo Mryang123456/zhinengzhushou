@@ -16,11 +16,12 @@ from fastapi.responses import StreamingResponse
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 
-from backend.app.agent.service import build_agent, checkpoint_config, checkpoint_scope, continue_after_approved_mcp, load_mcp_connections, stream_events
+from backend.app.agent.service import build_agent, continue_after_approved_mcp
 from backend.app.agent.turn_gate import ThreadTurnGate, TurnQueueTimeout
+from backend.app.agent.turns import checkpoint_config, checkpoint_scope, stream_events
 from backend.app.config import MCP_APPROVAL_DB_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE
 from backend.app.mcp.approval import create_approval_store
-from backend.app.mcp.governance import McpOutcomeUnknown, RISK_ORDER, invoke_governed, is_registered_tool, load_governance, risk_for_tool, validate_tool_arguments
+from backend.app.mcp.governance import McpOutcomeUnknown, RISK_ORDER, invoke_governed, is_registered_tool, load_governance, load_mcp_connections, risk_for_tool, validate_tool_arguments
 from backend.app.models.factory import ModelConfigurationError, ensure_model_ready, get_model_settings
 from backend.app.security import AuthenticationError, AuthenticatedUser, authenticate_bearer, auth_required, create_rate_limiter, issue_access_token, login_rate_identity, validate_multi_instance_configuration, validate_production_configuration, valid_api_key, verify_bootstrap_credentials
 from backend.app.observability import event, observe_duration, prometheus_metrics, trace_id
