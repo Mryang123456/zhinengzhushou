@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { streamAgentResponse, type AgentRequest } from "../services/agentApi";
+import { cancelAgentRun, streamAgentResponse, type AgentRequest } from "../services/agentApi";
 import type { StreamEvent } from "../types";
 export function useAgentStream(apiUrl: string) {
   const [runningIds, setRunningIds] = useState<ReadonlySet<string>>(() => new Set());
-  const controllersRef = useRef(new Map<string, AbortController>());
+  const controllersRef = useRef(new Map<string, {
+    controller: AbortController; request: AgentRequest; runId?: string;
+  }>());
   const isRunning = useCallback((threadId: string) => controllersRef.current.has(threadId), []);
-  const stop = useCallback((threadId: string) => controllersRef.current.get(threadId)?.abort(), []);
+  const stop = useCallback(async (threadId: string) => {
+    const active = controllersRef.current.get(threadId);
+    if (!active) return;
+    if (active.runId) await cancelAgentRun(apiUrl, active.runId, active.request);
+    else active.controller.abort();
+  }, [apiUrl]);
   useEffect(() => {
     const controllers = controllersRef.current;
     return () => {
-      for (const controller of controllers.values()) controller.abort();
+      for (const { controller } of controllers.values()) controller.abort();
       controllers.clear();
     };
   }, []);
@@ -19,14 +26,16 @@ export function useAgentStream(apiUrl: string) {
     const controllers = controllersRef.current;
     if (controllers.has(threadId)) return;
     const controller = new AbortController();
-    controllers.set(threadId, controller);
+    const active = { controller, request, runId: request.resume?.runId };
+    controllers.set(threadId, active);
     setRunningIds((ids) => new Set(ids).add(threadId));
     try {
       await streamAgentResponse(apiUrl, request, controller.signal, (event) => {
+        if (event.type === "run" && event.run_id) active.runId = event.run_id;
         if (!controller.signal.aborted) onEvent(event);
       });
     } finally {
-      if (controllers.get(threadId) === controller) {
+      if (controllers.get(threadId) === active) {
         controllers.delete(threadId);
         setRunningIds((ids) => {
           const next = new Set(ids);

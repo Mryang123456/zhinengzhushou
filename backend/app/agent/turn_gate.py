@@ -16,12 +16,16 @@ class _ThreadQueue:
     users: int = 0
 
 
-@asynccontextmanager
-async def _postgres_turn_lock(pool, thread_key: str, wait_seconds: float):
-    key = int.from_bytes(
+def thread_lock_key(thread_key: str) -> int:
+    return int.from_bytes(
         hashlib.blake2b(thread_key.encode("utf-8"), digest_size=8, person=b"zhixing-turn").digest(),
         "big", signed=True,
     )
+
+
+@asynccontextmanager
+async def _postgres_turn_lock(pool, thread_key: str, wait_seconds: float):
+    key = thread_lock_key(thread_key)
     async with pool.connection(timeout=wait_seconds) as connection:
         acquired = False
         try:

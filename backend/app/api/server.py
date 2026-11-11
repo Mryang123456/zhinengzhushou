@@ -10,15 +10,17 @@ from contextlib import aclosing, asynccontextmanager, nullcontext, suppress
 from pathlib import Path
 
 from anyio import CancelScope
-from fastapi import FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langgraph.checkpoint.memory import MemorySaver
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from backend.app.agent.service import build_agent, continue_after_approved_mcp
 from backend.app.agent.turn_gate import ThreadTurnGate, TurnQueueTimeout
 from backend.app.agent.turns import checkpoint_config, checkpoint_scope, stream_events
+from backend.app.api.chat_run_store import ChatRunStore, SubmissionConflict, TERMINAL
+from backend.app.api.chat_run_worker import run_chat_worker
 from backend.app.config import MCP_APPROVAL_DB_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE
 from backend.app.mcp.approval import create_approval_store
 from backend.app.mcp.governance import McpOutcomeUnknown, RISK_ORDER, invoke_governed, is_registered_tool, load_governance, load_mcp_connections, risk_for_tool, validate_tool_arguments
@@ -34,23 +36,36 @@ async def lifespan(application: FastAPI):
     database_url = os.getenv("CHECKPOINT_DATABASE_URL")
     application.state.checkpointer = MemorySaver() if not database_url else None
     application.state.checkpoint_pool = None
+    application.state.chat_runs = None
     pool = None
+    workers = []
     if database_url:
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
             from psycopg_pool import AsyncConnectionPool
+            pool_size = max(2, int(os.getenv("CHECKPOINT_POOL_MAX_SIZE", "10")))
             pool = AsyncConnectionPool(
                 conninfo=database_url,
                 kwargs={"autocommit": True, "prepare_threshold": 0},
                 min_size=1,
-                max_size=max(2, int(os.getenv("CHECKPOINT_POOL_MAX_SIZE", "10"))),
+                max_size=pool_size,
                 open=False,
             )
             await pool.open()
             checkpointer = AsyncPostgresSaver(pool)
-            await checkpointer.setup()
+            async with pool.connection() as migration:
+                await migration.execute("SELECT pg_advisory_lock(764814924190)")
+                try:
+                    await AsyncPostgresSaver(migration).setup()
+                finally:
+                    await migration.execute("SELECT pg_advisory_unlock(764814924190)")
+            store = ChatRunStore(pool)
+            await store.setup()
             application.state.checkpoint_pool = pool
             application.state.checkpointer = checkpointer
+            application.state.chat_runs = store
+            worker_count = min(pool_size - 1, max(1, int(os.getenv("AGENT_RUN_WORKERS", "2"))))
+            workers = [asyncio.create_task(run_chat_worker(store)) for _ in range(worker_count)]
         except Exception:
             # 已创建的连接池也必须关闭，避免启动失败后遗留连接。
             pool = pool or getattr(application.state, "checkpoint_pool", None)
@@ -60,6 +75,10 @@ async def lifespan(application: FastAPI):
     try:
         yield
     finally:
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        application.state.chat_runs = None
         application.state.checkpointer = None
         pool = getattr(application.state, "checkpoint_pool", None)
         if pool:
@@ -108,13 +127,22 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     thread_id: str = Field(default="web-demo", min_length=1, max_length=120)
     message_id: uuid.UUID | None = None
+    attempt_id: uuid.UUID | None = None
     retry: bool = False
+    recover_submission: bool = False
     use_mcp: bool = True
     use_memory: bool = True
 
 
 class ApprovalConfirmation(BaseModel):
-    confirmation_token: str = Field(min_length=20, max_length=200)
+    confirmation_token: str | None = Field(default=None, min_length=20, max_length=200)
+    run_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def require_approval_proof(self):
+        if self.confirmation_token is None and self.run_id is None:
+            raise ValueError("请提供确认令牌或原任务 ID。")
+        return self
 
 
 class TokenRequest(BaseModel):
@@ -194,6 +222,69 @@ async def connection_status(
     return {"status": "connected"}
 
 
+def _run_stream(store, user_id: str, run_id: uuid.UUID, after: int = 0) -> StreamingResponse:
+    async def generate():
+        cursor = after
+        last_sent = time.monotonic()
+        metadata = json.dumps({"type": "run", "run_id": str(run_id)})
+        yield f"event: run\ndata: {metadata}\n\n"
+        while True:
+            rows = await store.events(user_id, run_id, cursor)
+            if not rows:
+                return
+            run_status = rows[0][0]
+            for _, event_id, payload in rows:
+                if event_id is None:
+                    continue
+                cursor = event_id
+                frame = json.dumps({**payload, "event_id": str(event_id)}, ensure_ascii=False)
+                yield f"id: {event_id}\nevent: {payload['type']}\ndata: {frame}\n\n"
+                last_sent = time.monotonic()
+                if payload["type"] in {"done", "error"}:
+                    return
+            if rows[0][1] is not None:
+                continue
+            if run_status in TERMINAL:
+                return
+            if time.monotonic() - last_sent >= 15:
+                yield ": keep-alive\n\n"
+                last_sent = time.monotonic()
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff",
+    })
+
+
+@app.get("/chat/runs/{run_id}/events")
+async def resume_chat_run(
+    run_id: uuid.UUID, http_request: Request,
+    after: int = Query(default=0, ge=0, le=9223372036854775807),
+    x_agent_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    verify_request(http_request, x_agent_api_key)
+    user = authenticated_user(authorization)
+    store = getattr(app.state, "chat_runs", None)
+    if store is None or await store.status(user.user_id, run_id) is None:
+        raise HTTPException(404, detail="聊天任务不存在。")
+    return _run_stream(store, user.user_id, run_id, after)
+
+
+@app.post("/chat/runs/{run_id}/cancel")
+async def cancel_chat_run(
+    run_id: uuid.UUID, http_request: Request,
+    x_agent_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    verify_request(http_request, x_agent_api_key)
+    user = authenticated_user(authorization)
+    store = getattr(app.state, "chat_runs", None)
+    if store is None or await store.cancel(user.user_id, run_id) is None:
+        raise HTTPException(404, detail="聊天任务不存在。")
+    return {"accepted": True}
+
+
 @app.post("/chat/stream")
 async def chat_stream(
     request: ChatRequest,
@@ -204,7 +295,7 @@ async def chat_stream(
     """以 SSE 依次发送 token、工具事件、完成事件或错误事件。"""
     verify_request(http_request, x_agent_api_key)
     user = authenticated_user(authorization)
-    if request.retry and request.message_id is None:
+    if (request.retry or request.recover_submission) and request.message_id is None:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="重试必须提供原问题的消息 ID。")
     if is_direct_prompt_override(request.question):
         event("prompt_override_rejected", user_id=user.user_id)
@@ -213,6 +304,23 @@ async def chat_stream(
         ensure_model_ready(get_model_settings())
     except ModelConfigurationError as error:
         raise HTTPException(status_code=500, detail=f"模型配置错误：{error}") from error
+
+    store = getattr(app.state, "chat_runs", None)
+    if store is not None:
+        if request.recover_submission and request.retry and request.attempt_id is None:
+            raise HTTPException(422, detail="找回重试任务必须提供原尝试 ID。")
+        if ":" in request.thread_id:
+            raise HTTPException(422, detail="会话 ID 不能包含冒号。")
+        message_id = request.message_id or uuid.uuid4()
+        attempt_id = (request.attempt_id or uuid.uuid4()) if request.retry else message_id
+        try:
+            run_id = await store.submit(user.user_id, request.thread_id, message_id, attempt_id, {
+                "question": request.question, "retry": request.retry,
+                "use_memory": request.use_memory, "use_mcp": request.use_mcp,
+            })
+        except SubmissionConflict as error:
+            raise HTTPException(409, detail=str(error)) from error
+        return _run_stream(store, user.user_id, run_id)
 
     async def run_turn(deadline: asyncio.Timeout):
         thread_key = checkpoint_config(request.thread_id, user.user_id)["configurable"]["thread_id"]
@@ -245,7 +353,7 @@ async def chat_stream(
                 async with aclosing(stream_events(
                     graph, request.question, request.thread_id, user.user_id,
                     message_id=str(request.message_id) if request.message_id else None,
-                    retry=request.retry,
+                    retry=request.retry or request.recover_submission,
                 )) as frames:
                     async for frame in frames:
                         yield frame
@@ -314,7 +422,11 @@ async def confirm_mcp_approval(
     """消费一次性确认令牌后，执行之前被拦截的高风险 MCP 工具。"""
     verify_request(http_request, x_agent_api_key)
     user = authenticated_user(authorization)
-    action = approval_store.consume(approval_id, user.user_id, confirmation.confirmation_token)
+    token = confirmation.confirmation_token
+    store = getattr(app.state, "chat_runs", None)
+    if token is None and store is not None and confirmation.run_id is not None:
+        token = await store.approval_token(user.user_id, confirmation.run_id, approval_id)
+    action = approval_store.consume(approval_id, user.user_id, token) if token else None
     if not action:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该确认请求无效、已过期或已被使用。")
 

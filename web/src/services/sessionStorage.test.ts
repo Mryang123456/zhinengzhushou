@@ -87,3 +87,20 @@ it("读取旧版进行中的消息时结束加载，带审批的回复不可重�
   expect(messages?.[0]).toMatchObject({ pending: false, retryable: true });
   expect(messages?.[1]).toMatchObject({ pending: false, retryable: false });
 });
+
+it("刷新后保留持久化审批的待确认状态，但不保存令牌", async () => {
+  await saveSessions("approval-key", [{
+    id: "thread", title: "会话", updatedAt: 1,
+    messages: [{
+      id: "reply", role: "assistant", content: "等待审批",
+      approval: {
+        approvalId: "approval", runId: "run", confirmationToken: "private-token",
+        tool: "calendar", risk: "L3", arguments: {}, expiresAt: 9_999_999_999, status: "pending",
+      },
+    }],
+  }]);
+  expect(snapshots.get("approval-key")?.[0].messages[0].approval).toMatchObject({
+    runId: "run", confirmationToken: "", status: "pending",
+  });
+  expect((await loadSessions("approval-key"))?.[0].messages[0].approval?.status).toBe("pending");
+});

@@ -23,7 +23,7 @@ it.each([
   });
 });
 
-it("重试沿用同一个问题 ID，并关闭可能重复执行的工具", async () => {
+it("重试沿用同一个问题 ID", async () => {
   const fetchStub = vi.fn().mockImplementation(() =>
     Promise.resolve(new Response('data: {"type":"done","content":"完成"}\n\n'))
   );
@@ -36,4 +36,22 @@ it("重试沿用同一个问题 ID，并关闭可能重复执行的工具", asyn
     { question: "原问题", thread_id: "thread", message_id: "question-uuid", retry: false },
     { question: "原问题", thread_id: "thread", message_id: "question-uuid", retry: true },
   ]);
+});
+
+it("断流后订阅同一任务并按事件序号去重", async () => {
+  const frame = (event: object) => `data: ${JSON.stringify(event)}\n\n`;
+  const run = frame({ type: "run", run_id: "run-1" });
+  const token = frame({ type: "token", event_id: "9007199254740993", content: "已收到" });
+  const done = frame({ type: "done", event_id: "9007199254740994", content: "已完成" });
+  const fetchStub = vi.fn()
+    .mockResolvedValueOnce(new Response(run + token))
+    .mockResolvedValueOnce(new Response(run + token + done));
+  vi.stubGlobal("fetch", fetchStub);
+  const onEvent = vi.fn();
+  await streamAgentResponse("http://localhost", {
+    question: "原问题", threadId: "thread", messageId: "message", apiKey: "key", accessToken: "token",
+  }, new AbortController().signal, onEvent);
+  expect(fetchStub.mock.calls[1][0]).toBe("http://localhost/chat/runs/run-1/events?after=9007199254740993");
+  expect(fetchStub.mock.calls[1][1].headers.Authorization).toBe("Bearer token");
+  expect(onEvent.mock.calls.map(([event]) => event.type)).toEqual(["run", "token", "run", "done"]);
 });

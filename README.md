@@ -253,6 +253,16 @@ START → agent → tools? → agent → END
 
 未配置 `CHECKPOINT_DATABASE_URL` 时由 `MemorySaver` 负责进程内 checkpoint；配置 PostgreSQL 地址后，自动使用数据库型 checkpointer 并跨进程恢复。请使用稳定的 `user_id` 与 `thread_id`。
 
+配置 `CHECKPOINT_DATABASE_URL` 后，Web 聊天请求会写入同一个 PostgreSQL 的 `chat_runs` 表。API 实例启动后台 worker，按会话顺序处理任务，并通过 PostgreSQL advisory lock 共享队列。首次提交以会话内的 `message_id` 去重，显式重试可用独立的 `attempt_id` 去重。服务端在启动时初始化任务表和 Checkpoint 表，部署账号需要相应 DDL 权限。
+
+- `POST /chat/stream` 提交任务并立即返回带 `run_id` 的 SSE 流。浏览器断开后，后台任务继续执行。
+- 如果首个任务回执丢失，客户端可用 `recover_submission=true` 重发原提交参数，包括原有的 `message_id` 和重试时的 `attempt_id`，服务端会返回同一个任务。
+- `GET /chat/runs/{run_id}/events?after=<事件序号>` 按账号权限补发事件。浏览器会保存游标，在断流后自动重连，并可在再次打开已保存的会话时继续订阅。
+- `POST /chat/runs/{run_id}/cancel` 提交取消请求。后台执行器检查请求后停止当前工作流，已完成的外部操作保留其原有结果。
+- 刷新后的待审批卡片使用原任务 ID 发送确认。服务端核对任务归属、审批有效期和一次性令牌状态。
+
+worker 崩溃后，下一次取得会话锁的 worker 会读取持久化 Checkpoint，从待执行节点继续。接管期间跳过记忆写入和需要审批的 MCP 操作，降低外部副作用重复执行的风险。每个 API 进程默认运行两个 worker，可通过 `AGENT_RUN_WORKERS` 调整，连接池至少预留一个连接用于 HTTP 查询。生产部署使用现有的认证、Redis 和 PostgreSQL 配置。Windows 上本地验证异步 PostgreSQL 时，启动进程需要使用 `asyncio.SelectorEventLoop`。
+
 Web 请求按用户和会话串行写入 Checkpoint。等待上一轮完成的默认上限为 120 秒，可用 `AGENT_THREAD_QUEUE_TIMEOUT_SECONDS` 调整。使用 PostgreSQL 时，服务会在同一连接上持有会话级咨询锁并写入 Checkpoint。数据库地址应使用直连或会话池模式。
 
 默认模型由 `.env.local` 的 `MODEL_PROVIDER=openai` 与 `MODEL_NAME=gpt-4.1-mini` 决定。

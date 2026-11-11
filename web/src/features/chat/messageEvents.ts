@@ -27,6 +27,7 @@ export function applyStreamEvent(message: Message, event: StreamEvent, replaceCo
       approval: {
         approvalId: event.approval_id,
         confirmationToken: event.confirmation_token,
+        runId: message.resume?.runId,
         tool: event.tool,
         risk: event.risk,
         arguments: event.arguments,

@@ -7,11 +7,14 @@ export type Message = {
   retryable?: boolean;
   notice?: string;
   approval?: PendingApproval;
+  resume?: { runId: string; after: string };
+  submission?: { retry: boolean; attemptId?: string };
 };
 
 export type PendingApproval = {
   approvalId: string;
   confirmationToken: string;
+  runId?: string;
   tool: string;
   risk: string;
   arguments: Record<string, unknown>;
@@ -22,7 +25,9 @@ export type PendingApproval = {
 export type ProgressStage = "preparing" | "understanding" | "context" | "drafting" | "checking";
 
 export type StreamEvent = {
-  type: "progress" | "token" | "tool_start" | "tool_end" | "approval_required" | "done" | "error";
+  type: "run" | "progress" | "token" | "tool_start" | "tool_end" | "approval_required" | "done" | "error";
+  run_id?: string;
+  event_id?: string;
   stage?: ProgressStage;
   content?: string;
   tools?: string[];

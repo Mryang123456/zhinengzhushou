@@ -92,6 +92,8 @@ class AgentState(MessagesState):
     draft_answer: NotRequired[str | None]
     retry: NotRequired[bool]
     context_limit_reached: NotRequired[bool]
+    durable_run_id: NotRequired[str | None]
+    finished_run_id: NotRequired[str]
 
 
 def content_to_text(content: object) -> str:
@@ -114,6 +116,7 @@ async def build_agent(
     checkpointer=None,
     *,
     initial_question: str | None = None,
+    recovering: bool = False,
 ):
     """构建同时包含本地工具和已发现 MCP 工具的工作流。"""
     tools = TOOLS.copy()
@@ -229,7 +232,7 @@ async def build_agent(
         if not intent.get("general") and not intent.get("knowledge_query") and not tools_exhausted:
             available_tools = {
                 name: tool for name, tool in tool_by_name.items()
-                if not state.get("retry") or name not in retry_blocked_tools
+                if not (recovering or state.get("retry")) or name not in retry_blocked_tools
             }
             retrieval_limit = max(1, min(int(os.getenv("AGENT_TOOL_RETRIEVAL_LIMIT", "12")), 30))
             retrieved_names, retrieval_mode = retrieve_tool_candidates(question, available_tools, retrieval_limit)
@@ -255,9 +258,9 @@ async def build_agent(
             else ""
         )
         retry_instruction = (
-            "\n\n本轮是重试。长期记忆仅可读取，MCP 仅可调用低风险工具。"
+            "\n\n本轮是重试或中断恢复。长期记忆仅可读取，MCP 仅可调用低风险工具。"
             "请明确区分先前操作和本轮执行结果。"
-            if state.get("retry") else ""
+            if recovering or state.get("retry") else ""
         )
         limit_instruction = (
             "\n\n本轮工具额度已用完。请根据已取得的结果完成回答，说明尚未确认的部分。"
@@ -358,7 +361,7 @@ async def build_agent(
         local_calls = []
         for call in calls:
             name = call["name"]
-            if state.get("retry") and name in retry_blocked_tools:
+            if (recovering or state.get("retry")) and name in retry_blocked_tools:
                 results[call["id"]] = rejected(call, "重试只允许读取资料，已阻止重复修改记忆或发起审批。")
                 continue
             if name not in allowed:
@@ -437,7 +440,7 @@ async def build_agent(
         # 保持前端的增量渲染协议；此处的文本已经经过质量门批准。
         for start in range(0, len(answer), 80):
             writer({"type": "token", "content": answer[start : start + 80]})
-        return {}
+        return {"finished_run_id": state["durable_run_id"]} if state.get("durable_run_id") else {}
 
     def route_after_agent(state: AgentState):
         return "quality" if state.get("draft_answer") is not None else "tools"

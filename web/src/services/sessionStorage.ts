@@ -5,8 +5,11 @@ const LIMIT = 40;
 const INTERRUPTED_NOTICE = "回答已中断，可以重新发送。";
 
 function restoreInterruptedReply(message: Message): Message {
+  if (message.approval?.status === "pending" && message.approval.expiresAt < Math.floor(Date.now() / 1000)) {
+    message = { ...message, approval: { ...message.approval, status: "failed", confirmationToken: "" } };
+  }
   if (message.pending) {
-    return { ...message, pending: false, notice: INTERRUPTED_NOTICE, retryable: !message.approval };
+    return { ...message, pending: false, notice: INTERRUPTED_NOTICE, retryable: Boolean(message.resume) || !message.approval };
   }
   if (message.notice === INTERRUPTED_NOTICE && message.retryable === undefined && !message.approval) {
     return { ...message, retryable: true };
@@ -80,7 +83,8 @@ function prepareForStorage(session: Session): Session {
         approval: {
           ...approval,
           confirmationToken: "",
-          status: approval.status === "pending" || approval.status === "executing" ? "failed" : approval.status,
+          status: approval.status === "executing" || (approval.status === "pending" && !approval.runId)
+            ? "failed" : approval.status,
         },
       };
     }),
