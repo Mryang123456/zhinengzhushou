@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+TOOL_OUTPUT_MAX_CHARS = 12_000
+
 PROMPT_OVERRIDE = re.compile(
     r"(?:ignore|disregard|reveal|print).{0,48}(?:previous|system|prompt|instruction)|"
     r"(?:忽略|无视|绕过).{0,24}(?:之前|以上|系统|指令)|(?:系统提示词|开发者消息).{0,24}(?:输出|展示|泄露)",
@@ -24,7 +26,7 @@ def contains_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in SECRET_PATTERNS)
 
 
-def sanitize_untrusted_text(value: object, maximum: int = 12_000) -> str:
+def sanitize_untrusted_text(value: object, maximum: int = TOOL_OUTPUT_MAX_CHARS) -> str:
     text = str(value)[:maximum]
     text = PROMPT_OVERRIDE.sub("[已移除疑似提示词注入内容]", text)
     for pattern in SECRET_PATTERNS:

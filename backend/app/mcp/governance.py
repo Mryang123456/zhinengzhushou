@@ -12,7 +12,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import ToolException
 
 from backend.app.config import PROJECT_ROOT
-from backend.app.content_safety import sanitize_untrusted_text
+from backend.app.content_safety import TOOL_OUTPUT_MAX_CHARS, sanitize_untrusted_text
 
 RISK_ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
 
@@ -121,7 +121,7 @@ def validate_tool_arguments(name: str, arguments: dict, governance: dict) -> dic
     return checked
 
 
-def sanitize_output(value: object, maximum: int = 12000) -> str:
+def sanitize_output(value: object, maximum: int = TOOL_OUTPUT_MAX_CHARS) -> str:
     return sanitize_untrusted_text(value, maximum)
 
 

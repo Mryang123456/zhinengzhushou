@@ -37,10 +37,15 @@ def _coverage(terms: set[str], text: str) -> float:
     return len(terms & lexical_terms(text)) / len(terms) if terms else 0.0
 
 
+def _retrieval_text(row: dict) -> str:
+    """标题路径参与相关性判断，最终证据仍使用未改写的 content。"""
+    return row.get("contextual_content") or row["content"]
+
+
 def rerank(query: str, rows: list[dict], limit: int = 5) -> list[dict]:
     terms = lexical_terms(query)
     scored = [
-        {**row, "score": float(row["score"]) + LEXICAL_WEIGHT * _coverage(terms, row["content"])}
+        {**row, "score": float(row["score"]) + LEXICAL_WEIGHT * _coverage(terms, _retrieval_text(row))}
         for row in rows
     ]
     return sorted(scored, key=lambda row: row["score"], reverse=True)[:limit]
@@ -52,6 +57,19 @@ class RetrievalStages:
     reranked: list[dict]
     results: list[dict]
     mode: str
+    rerank_mode: str = "rules"
+
+
+def unique_evidence_groups(rows: list[dict]) -> list[dict]:
+    """同一组原始引用只保留排名最靠前的种子。"""
+    unique = []
+    seen: set[frozenset[str]] = set()
+    for row in rows:
+        key = frozenset(row.get("citations") or [row["citation"]])
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
+    return unique
 
 
 def rank_candidates(
@@ -65,7 +83,7 @@ def rank_candidates(
     terms = lexical_terms(query)
     keyword_hits = {
         row["citation"] for row in keyword_rows
-        if row["score"] > 0 and _coverage(terms, row["content"]) >= MIN_KEYWORD_COVERAGE
+        if row["score"] > 0 and _coverage(terms, _retrieval_text(row)) >= MIN_KEYWORD_COVERAGE
     }
     if vector_rows is None:
         candidates = keyword_rows

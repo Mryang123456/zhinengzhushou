@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from ddgs import DDGS
 from langchain_core.tools import ToolException, tool
 
-from backend.app.knowledge.store import KnowledgeStore, format_untrusted_evidence
+from backend.app.knowledge.store import KnowledgeStore, pack_evidence
 from backend.app.memory.store import MemoryStore
 from backend.app.skills.registry import Skill
 
@@ -179,9 +179,9 @@ def create_knowledge_tools(database_url: str | None, user_id: str):
     @tool
     def search_knowledge_base(query: str) -> str:
         """检索已导入的内部知识库，返回文本片段及其文档来源。"""
-        rows = store.search(query, user_id)
-        if not rows:
+        evidence, _ = pack_evidence(store.search(query, user_id))
+        if not evidence:
             raise ToolException("知识库中未找到可引用且你有权限访问的资料。")
-        return "\n\n".join(format_untrusted_evidence(row) for row in rows)
+        return evidence
 
     return [search_knowledge_base]

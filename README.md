@@ -166,9 +166,14 @@ KNOWLEDGE_EMBEDDING_PROVIDER=openai
 KNOWLEDGE_EMBEDDING_MODEL=text-embedding-3-small
 # 仅用于向量候选的原始余弦相似度门槛，范围 [-1, 1]。
 KNOWLEDGE_MIN_SCORE=0.22
+# 结构化切片和跨片段上下文窗口
+KNOWLEDGE_CHUNK_TOKENS=500
+KNOWLEDGE_CHUNK_OVERLAP_TOKENS=80
+KNOWLEDGE_NEIGHBOR_WINDOW=1
+KNOWLEDGE_EVIDENCE_TOKENS=1800
 ```
 
-基础版支持导入 UTF-8 的 `.txt`、`.md`、`.json` 文件：
+支持导入 UTF-8 的 `.txt`、`.md`、`.json`、`.html`、`.pdf`、`.docx` 和 `.xlsx` 文件：
 
 ```powershell
 python -m backend.app.knowledge.cli .\资料\产品说明.md --owner-id 开发者A --scope private
@@ -176,7 +181,29 @@ python -m backend.app.knowledge.cli .\资料\产品说明.md --owner-id 开发�
 
 导入时必须指定所属用户或租户；`private` 仅所属用户可检索，`shared` 才允许其他用户检索。同一所有者重新导入同一来源时，内容变化会创建新的文档 ID，原片段归档并保留原引用。重复导入相同片段会复用当前版本。检索只使用当前版本。
 
-Agent 在配置知识库地址后可以调用 `search_knowledge_base`。重排保留原始余弦相似度，RRF 和词面覆盖率作为有上限的加分。候选达到向量相似度门槛，或命中全文检索且覆盖至少一半查询词项，才能进入最终 Top-K。结果携带 `knowledge://文档ID#片段` 引用，文档内容按不可信资料处理。
+导入会优先保留 Markdown/HTML/DOCX 标题、PDF 页码和 XLSX 工作表边界，按估算 Token 预算在段落、句子和表格行边界切分。标题路径只加入检索文本和 Embedding，原始正文单独保存用于逐字引用；切片参数会写入文档版本，参数或算法变化后重新导入会创建新版本，避免新旧向量混用。
+
+Agent 在配置知识库地址后可以调用 `search_knowledge_base`。重排保留原始余弦相似度，RRF 和词面覆盖率作为有上限的加分。候选达到向量相似度门槛，或命中全文检索且覆盖至少一半查询词项，才能进入最终 Top-K。命中后只在同一活动文档、同一章节和 ACL 范围内扩展相邻片段，并受证据 Token 预算约束；每个扩展片段仍携带独立的 `knowledge://文档ID#片段` 引用，文档内容按不可信资料处理。
+
+切片版本 `structure-v4` 为同一文档版本内的每个章节分配独立编号。旧文档仍可检索，重新导入原文件后才会启用同章节邻居扩展。检索会在选出最终 Top-K 之前合并引用集合完全相同的证据组。
+
+### 本地 Cross-Encoder 两轮重排
+
+安装可选依赖，将多语言模型（例如 `BAAI/bge-reranker-v2-m3` 的 safetensors 权重及配置、分词器文件）预先部署到本地目录：
+
+```powershell
+python -m pip install -r backend/requirements-rerank.txt
+```
+
+在 `.env.local` 配置后重启后端：
+
+```env
+KNOWLEDGE_RERANK_MODEL=./models/bge-reranker-v2-m3
+KNOWLEDGE_RERANK_DEVICE=cpu
+KNOWLEDGE_RERANK_TIMEOUT_SECONDS=5
+```
+
+第一轮对最多 20 个通过证据门槛的候选片段打分。第二轮对其中最多 2K 个入围片段的同章节证据组打分，再返回 Top-K。片段的原文、引用和既有证据门槛仍然适用，无需重新导入知识库。每进程最多执行一个重排任务，超时、繁忙或模型不可用时使用规则顺序。推理仅使用本地模型文件。实时评测报告中的 `rerank_mode` 可用于核对重排是否生效，`evidence_set_complete_at_k` 统计 Top-K 证据组是否同时覆盖全部标注片段。
 
 ### RAG 检索评测
 

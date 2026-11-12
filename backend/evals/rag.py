@@ -10,7 +10,7 @@ from pathlib import Path
 from statistics import mean
 
 from backend.app.knowledge.rerank import rank_candidates
-from backend.app.knowledge.store import KnowledgeStore, knowledge_min_similarity
+from backend.app.knowledge.store import KnowledgeStore, knowledge_min_similarity, pack_evidence
 
 
 def recall(rows: list[dict], relevant: set[str]) -> float:
@@ -18,14 +18,15 @@ def recall(rows: list[dict], relevant: set[str]) -> float:
 
 
 def measure(stages, relevant: set[str], k: int) -> dict[str, float]:
+    _, evidence = pack_evidence(stages.results[:k])
     if not relevant:
-        return {"no_evidence_accuracy": float(not stages.results)}
+        return {"no_evidence_accuracy": float(not evidence)}
 
     seen: set[str] = set()
     hits = []
     for row in stages.results[:k]:
         citation = row["citation"]
-        hits.append(citation in relevant and citation not in seen)
+        hits.append(citation in evidence and citation in relevant and citation not in seen)
         seen.add(citation)
     dcg = sum(hit / math.log2(rank + 2) for rank, hit in enumerate(hits))
     ideal = sum(1 / math.log2(rank + 2) for rank in range(min(k, len(relevant))))
@@ -36,6 +37,7 @@ def measure(stages, relevant: set[str], k: int) -> dict[str, float]:
         "precision_at_k": sum(hits) / k,
         "mrr_at_k": next((1 / rank for rank, hit in enumerate(hits, 1) if hit), 0.0),
         "ndcg_at_k": dcg / ideal,
+        "evidence_set_complete_at_k": float(relevant <= evidence),
     }
 
 
@@ -116,7 +118,7 @@ def main() -> int:
         for metric, value in scores.items():
             metrics.setdefault(metric, []).append(value)
         details.append({
-            "id": case["id"], "retrieval_mode": stages.mode, **scores,
+            "id": case["id"], "retrieval_mode": stages.mode, "rerank_mode": stages.rerank_mode, **scores,
             "returned_chunks": [row["citation"] for row in stages.results],
         })
     averages = {metric: mean(values) for metric, values in metrics.items()}
