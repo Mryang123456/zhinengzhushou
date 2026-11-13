@@ -75,6 +75,24 @@ class SecurityTests(unittest.TestCase):
         self.assertFalse(valid_api_key("错误", "正确"))
         self.assertTrue(valid_api_key("正确", "正确"))
 
+    def test_production_embedding_requires_explicit_revision_and_service_key(self):
+        base = {
+            "ENVIRONMENT": "production", "AUTH_REQUIRED": "true", "JWT_SECRET": "x" * 32,
+            "AUTH_BOOTSTRAP_USER": "admin", "AUTH_BOOTSTRAP_PASSWORD_HASH": password_hash("long-test-password-123"),
+            "AGENT_CORS_ORIGINS": "https://agent.example.com", "MULTI_INSTANCE_MODE": "true",
+            "REDIS_URL": "redis://example", "MEMORY_DATABASE_URL": "postgresql://example",
+            "CHECKPOINT_DATABASE_URL": "postgresql://example", "KNOWLEDGE_EMBEDDING_PROVIDER": "openai",
+            "KNOWLEDGE_EMBEDDING_SERVICE_URL": "http://embedding.internal",
+        }
+        with patch.dict("os.environ", base, clear=True):
+            with self.assertRaises(RuntimeError):
+                validate_production_configuration()
+            __import__("os").environ["KNOWLEDGE_EMBEDDING_MODEL_REVISION"] = "2026-11"
+            with self.assertRaises(RuntimeError):
+                validate_production_configuration()
+            __import__("os").environ["EMBEDDING_SERVICE_API_KEY"] = "x" * 32
+            validate_production_configuration()
+
     def test_jwt_authentication_uses_signed_server_subject(self):
         env = __import__("os").environ
         previous = {key: env.get(key) for key in ("AUTH_REQUIRED", "JWT_SECRET")}

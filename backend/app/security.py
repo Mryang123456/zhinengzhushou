@@ -199,6 +199,13 @@ def validate_production_configuration() -> None:
         raise RuntimeError("生产环境 AGENT_CORS_ORIGINS 必须为明确的非本地 HTTPS 前端域名。")
     if os.getenv("MULTI_INSTANCE_MODE", "false").lower() not in {"1", "true", "yes"}:
         raise RuntimeError("生产环境必须设置 MULTI_INSTANCE_MODE=true，禁止本地状态回退。")
+    if os.getenv("KNOWLEDGE_EMBEDDING_PROVIDER", "").strip().lower() == "openai":
+        if not os.getenv("KNOWLEDGE_EMBEDDING_MODEL_REVISION"):
+            raise RuntimeError("生产环境启用 Embedding 时必须显式设置 KNOWLEDGE_EMBEDDING_MODEL_REVISION。")
+        if os.getenv("KNOWLEDGE_EMBEDDING_SERVICE_URL") and not os.getenv("EMBEDDING_SERVICE_API_KEY"):
+            raise RuntimeError("使用独立 Embedding 服务时必须设置 EMBEDDING_SERVICE_API_KEY。")
+        if os.getenv("KNOWLEDGE_EMBEDDING_SERVICE_URL") and len(os.getenv("EMBEDDING_SERVICE_API_KEY", "")) < 32:
+            raise RuntimeError("生产环境 EMBEDDING_SERVICE_API_KEY 至少需要 32 个字符。")
     validate_multi_instance_configuration()
 
 

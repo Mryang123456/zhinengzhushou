@@ -104,11 +104,38 @@ class KnowledgeStore:
         access_scope = validate_access_scope(access_scope)
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         fingerprint = chunking_fingerprint(maximum, overlap)
+        metadata_json = json.dumps(metadata or {})
+
+        # 先在短事务中判断相同版本，避免重复导入时仍调用付费 Embedding。
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (json.dumps(["knowledge-import", owner_id, source]),),
+            )
+            cursor.execute(
+                """
+                SELECT id, content_hash, chunking_version
+                FROM knowledge_documents
+                WHERE owner_id = %s AND source = %s AND status = 'active'
+                """,
+                (owner_id, source),
+            )
+            previous = cursor.fetchone()
+            if previous and previous[1] == digest and previous[2] == fingerprint:
+                cursor.execute(
+                    """
+                    UPDATE knowledge_documents
+                    SET metadata = %s, access_scope = %s, updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (metadata_json, access_scope, previous[0]),
+                )
+                return len(chunks)
+
         try:
-            vectors = embed_texts([chunk.contextual_content for chunk in chunks])
+            vectors = embed_texts([chunk.contextual_content for chunk in chunks], tenant_scope=owner_id)
         except EmbeddingUnavailable:
             vectors = [None] * len(chunks)
-        metadata_json = json.dumps(metadata or {})
 
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -127,15 +154,15 @@ class KnowledgeStore:
             same_version = bool(previous and previous[1] == digest and previous[2] == fingerprint)
 
             if same_version:
-                document_id = previous[0]
                 cursor.execute(
                     """
                     UPDATE knowledge_documents
                     SET metadata = %s, access_scope = %s, updated_at = NOW()
                     WHERE id = %s
                     """,
-                    (metadata_json, access_scope, document_id),
+                    (metadata_json, access_scope, previous[0]),
                 )
+                return len(chunks)
             else:
                 if previous:
                     cursor.execute(
@@ -164,24 +191,15 @@ class KnowledgeStore:
                     chunk.section_title, list(chunk.section_path), chunk.section_index, chunk.token_count,
                     chunk.content_hash, vector_text,
                 ))
-            if not same_version:
-                cursor.executemany(
-                    """
-                    INSERT INTO knowledge_chunks(
-                        document_id, chunk_index, content, contextual_content,
-                        section_title, section_path, section_index, token_count, content_hash, embedding
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
-                    """,
-                    rows,
-                )
-            elif any(row[-1] is not None for row in rows):
-                cursor.executemany(
-                    """
-                    UPDATE knowledge_chunks SET embedding = %s::vector
-                    WHERE document_id = %s AND chunk_index = %s
-                    """,
-                    [(row[-1], row[0], row[1]) for row in rows if row[-1] is not None],
-                )
+            cursor.executemany(
+                """
+                INSERT INTO knowledge_chunks(
+                    document_id, chunk_index, content, contextual_content,
+                    section_title, section_path, section_index, token_count, content_hash, embedding
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                """,
+                rows,
+            )
         return len(chunks)
 
     def search(
@@ -200,7 +218,7 @@ class KnowledgeStore:
         if limit < 1 or not -1 <= threshold <= 1:
             raise ValueError("检索条数必须为正数，相似度阈值必须在 [-1, 1] 之间。")
         try:
-            vector = embed_texts([query], for_search=True)[0]
+            vector = embed_texts([query], for_search=True, tenant_scope=user_id)[0]
         except EmbeddingUnavailable as error:
             if error.__cause__ is not None:
                 logger.warning("知识库查询向量不可用，降级为关键词检索：%s", type(error.__cause__).__name__)

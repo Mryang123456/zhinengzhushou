@@ -173,6 +173,17 @@ KNOWLEDGE_NEIGHBOR_WINDOW=1
 KNOWLEDGE_EVIDENCE_TOKENS=1800
 ```
 
+Embedding 调用统一经过 `backend/app/knowledge/embedding`。网关按条数和估算 Token 双阈值拆批，执行租户及全局 RPM/TPM 限流、并发保护、有限重试和熔断。缓存 Key 包含租户、Provider、模型、模型版本、维度、query/document 用途、规范化版本和文本 SHA-256；默认使用进程内 LRU，配置 `REDIS_URL` 后增加共享 L2 缓存与跨实例 SingleFlight。相同版本文档会在向量化之前短事务判重。
+
+需要独立部署时启动内部 Embedding Gateway：
+
+```powershell
+$env:EMBEDDING_SERVICE_API_KEY="请使用随机长密钥"
+python -m uvicorn backend.app.knowledge.embedding.api:app --host 127.0.0.1 --port 8010
+```
+
+业务后端配置 `KNOWLEDGE_EMBEDDING_SERVICE_URL=http://127.0.0.1:8010` 和相同密钥后会改走内部服务。生产环境应通过私有网络访问，并配置 Redis 共享缓存与限流状态。模型、输出维度、规范化规则或 Embedding 指令变化时必须升级 `KNOWLEDGE_EMBEDDING_MODEL_REVISION` 或 `KNOWLEDGE_EMBEDDING_NORMALIZATION_VERSION`，旧缓存随后按 TTL 回收。文档隐私删除或租户注销时调用 `invalidate_embedding_cache(tenant_scope)`；独立服务使用受认证的 `POST /v1/cache/invalidate` 主动删除该租户的 L1/L2 缓存引用。
+
 支持导入 UTF-8 的 `.txt`、`.md`、`.json`、`.html`、`.pdf`、`.docx` 和 `.xlsx` 文件：
 
 ```powershell

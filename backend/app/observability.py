@@ -14,8 +14,14 @@ duration_counts: Counter[str] = Counter()
 logger = logging.getLogger("langgraph_agent.events")
 
 
+def increment(name: str, amount: int = 1) -> None:
+    """增加低基数计数指标。"""
+    if amount > 0:
+        metrics[name] += amount
+
+
 def event(name: str, **fields: object) -> None:
-    metrics[name] += 1
+    increment(name)
     logger.info(json.dumps({"event": name, "trace_id": trace_id.get(), "at_ms": int(time.time() * 1000), **fields}, ensure_ascii=False))
 
 
