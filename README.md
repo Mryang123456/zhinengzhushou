@@ -2,6 +2,12 @@
 
 这是一个可运行的命令行智能体：LangChain 提供 GPT 模型和工具封装，LangGraph 将“模型判断 → 工具执行 → 模型总结”编排成有状态图。
 
+## 整体架构
+
+![智能 Agent 整体架构与运行流程](docs/architecture/agent-architecture.png)
+
+项目按照 UI 层、Agent 编排层、工具层、知识层和集成层组织，完整的分层职责、运行流程及可维护 Mermaid 源图见 [架构说明](docs/architecture/architecture.md)。
+
 ## 能力边界
 
 - 使用 GPT 回答问题；
