@@ -71,6 +71,11 @@ def create_chat_model(settings: ModelSettings | None = None):
 
         if settings.base_url:
             common["base_url"] = settings.base_url
+        if settings.name.startswith("deepseek-") or (settings.base_url and "api.deepseek.com" in settings.base_url):
+            # DeepSeek 当前默认启用思考模式；其工具调用要求客户端完整回传
+            # reasoning_content。现有 LangChain ChatOpenAI 链路不保证保留该字段，
+            # 因此固定使用官方支持的非思考模式，确保返回标准 tool_calls。
+            common["extra_body"] = {"thinking": {"type": "disabled"}}
         return ChatOpenAI(**common)
 
     if settings.provider == "ollama":

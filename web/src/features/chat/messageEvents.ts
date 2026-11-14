@@ -6,6 +6,9 @@ const progressLabels: Record<ProgressStage, string> = {
   context: "正在整理较早的对话",
   drafting: "正在组织回答",
   checking: "正在校验回答",
+  searching_web: "正在搜索公开资料",
+  verifying_recommendations: "正在核对候选景点是否符合条件",
+  revising: "正在根据来源修订回答",
 };
 
 export function applyStreamEvent(message: Message, event: StreamEvent, replaceContent = false): Message {

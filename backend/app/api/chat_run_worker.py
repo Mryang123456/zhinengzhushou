@@ -12,13 +12,16 @@ from backend.app.agent.service import build_agent
 from backend.app.agent.turn_gate import thread_lock_key
 from backend.app.agent.turns import checkpoint_config, stream_events
 from backend.app.config import MCP_CONFIG_FILE, MEMORY_DB_FILE
+from backend.app.observability import increment
+from backend.app.mcp.governance import mcp_enabled
+from backend.app.security import account_enabled
 
 logger = logging.getLogger(__name__)
 
 
 async def _run_frames(store, conn, run_id, user_id, thread_id, message_id, payload, attempt):
     graph = await build_agent(
-        MCP_CONFIG_FILE if payload["use_mcp"] else None,
+        MCP_CONFIG_FILE if payload["use_mcp"] and mcp_enabled() else None,
         user_id,
         MEMORY_DB_FILE if payload["use_memory"] else None,
         os.getenv("MEMORY_DATABASE_URL") if payload["use_memory"] else None,
@@ -59,7 +62,10 @@ async def _execute(store, conn, run_id, user_id, thread_id, claim):
     tokens = ()
     if cancelled:
         frame = {"type": "error", "message": "已停止生成。", "retryable": False}
+    elif not account_enabled(user_id):
+        frame = {"type": "error", "message": "账号已停用。", "retryable": False}
     elif attempts > 3:
+        increment("chat_recovery_exhausted")
         frame = {"type": "error", "message": "任务多次中断，请重新发起。"}
     else:
         try:
@@ -74,6 +80,8 @@ async def _execute(store, conn, run_id, user_id, thread_id, claim):
         except Exception:
             logger.exception("后台聊天任务失败 run_id=%s", run_id)
             frame = {"type": "error", "message": "智能体执行失败，请稍后重试。"}
+    if frame["type"] == "error" and not cancelled:
+        increment("chat_run_error")
     await store.finish(conn, run_id, frame, tokens)
 
 
@@ -118,5 +126,6 @@ async def run_chat_worker(store):
             if await _process_next(store):
                 continue
         except Exception:
+            increment("chat_worker_error")
             logger.exception("后台聊天队列暂时不可用")
         await asyncio.sleep(0.5)

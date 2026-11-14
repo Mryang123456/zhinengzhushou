@@ -22,7 +22,7 @@ export type PendingApproval = {
   status: "pending" | "executing" | "completed" | "failed";
 };
 
-export type ProgressStage = "preparing" | "understanding" | "context" | "drafting" | "checking";
+export type ProgressStage = "preparing" | "understanding" | "context" | "drafting" | "checking" | "searching_web" | "verifying_recommendations" | "revising";
 
 export type StreamEvent = {
   type: "run" | "progress" | "token" | "tool_start" | "tool_end" | "approval_required" | "done" | "error";

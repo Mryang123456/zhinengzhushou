@@ -1,10 +1,18 @@
-import type { Message, StreamEvent } from "../types";
+import type { Message, Session, StreamEvent } from "../types";
 import { consumeSseBlocks } from "../utils/sse";
 export type AgentRequest = {
   question: string; threadId: string; messageId: string; apiKey: string; accessToken: string;
   retry?: boolean; attemptId?: string; recoverSubmission?: boolean; resume?: Message["resume"];
 };
 const authHeaders = (apiKey: string, accessToken: string) => ({ ...(apiKey ? { "X-Agent-Api-Key": apiKey } : {}), ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) });
+
+export async function loadRemoteSessions(apiUrl: string, apiKey: string, accessToken: string, signal: AbortSignal): Promise<Session[]> {
+  const response = await fetch(`${apiUrl}/chat/sessions`, {
+    headers: authHeaders(apiKey, accessToken), cache: "no-store", signal,
+  });
+  if (!response.ok) throw serviceRequestError(response.status);
+  return (await response.json()).sessions;
+}
 
 export type ConnectionStatus = "checking" | "connected" | "login-required" | "session-expired"
   | "api-key-required" | "invalid-api-key" | "unreachable";

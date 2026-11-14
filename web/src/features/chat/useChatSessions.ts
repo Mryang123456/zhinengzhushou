@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { saveSessions } from "../../services/sessionStorage";
 import type { Message, Session } from "../../types";
 import { archiveSessionState, createSessionTitle, ensureVisibleSession, resolveVisibleSession } from "../../utils/session";
+import { mergeRemoteSessions } from "./mergeRemoteSessions";
 
 const welcome = "你好，我是智行助手。你可以让我查询天气、搜索资料、计算表达式，或在需要时明确告诉我“记住这件事”。";
 
@@ -76,12 +77,17 @@ export function useChatSessions(storageKey: string, savedSessions: Session[] | n
     updateDraft(id, () => "");
   };
 
+  const syncSessions = useCallback((remote: Session[]) => {
+    if (remote.length) setSessions((local) => mergeRemoteSessions(local, remote));
+  }, []);
+
   return {
     activeSession,
     visibleSessions,
     draft: drafts.get(activeSession.id) ?? "",
     saveFailed,
     updateMessages,
+    syncSessions,
     selectSession,
     createSession,
     renameSession,

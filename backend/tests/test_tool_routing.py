@@ -24,8 +24,192 @@ from backend.app.skills.registry import (
 
 
 class ToolRoutingTests(unittest.TestCase):
+    def test_evidence_review_can_supplement_partial_results_or_ask(self):
+        import json
+
+        question = "星河科技为什么裁员"
+        source = "https://example.com/notice"
+
+        class Model:
+            def __init__(self, action):
+                self.action = action
+
+            async def ainvoke(self, messages):
+                data = json.loads(messages[-1].content)
+                if "当前请求" in data:
+                    return AIMessage(content="invalid router output")
+                if len(data["已尝试"]) == 1 and self.action == "clarify":
+                    return AIMessage(content='{"action":"clarify","clarification":"你要核实的是哪个部门的调整？"}')
+                return AIMessage(content='{"action":"search","query":"星河科技 人员调整公告"}')
+
+            async def astream(self, messages):
+                yield AIMessageChunk(content="据公告，人员调整已启动，具体原因尚未公开。[S1]")
+
+        async def collect():
+            graph = await build_agent(memory_db_path=None, initial_question=question)
+            return [frame async for frame in stream_events(graph, question, "review-evidence")]
+
+        for action, expected_review, expected_calls in (
+            ("search", ["search", "partial"], 2), ("clarify", ["clarify"], 1),
+        ):
+            with (
+                self.subTest(action=action),
+                patch("backend.app.agent.service.create_chat_model", return_value=Model(action)),
+                patch("backend.app.agent.tools.DDGS") as ddgs,
+            ):
+                ddgs.return_value.text.return_value = [{"href": source, "body": "公司已启动人员调整，未披露原因。"}]
+                events = asyncio.run(collect())
+                self.assertEqual(ddgs.return_value.text.call_count, expected_calls)
+                self.assertEqual([event["action"] for event in events if event["type"] == "evidence_review"], expected_review)
+                if action == "clarify":
+                    self.assertEqual(events[-1]["content"], "你要核实的是哪个部门的调整？")
+                else:
+                    self.assertIn(source, events[-1]["content"])
+                    self.assertTrue(any(event.get("passed") is True for event in events))
+
+    def test_verification_followup_uses_only_an_explicit_event_in_the_same_thread(self):
+        followup = "帮我查证"
+        event = "星河科技为什么裁员"
+        skills = load_skills(SKILLS_DIR)
+        for text in (followup, "那就帮我联网核实一下吧", "请查证这条消息"):
+            self.assertEqual(classify(text, skills)["status"], "clarify")
+        self.assertNotEqual(classify("帮我查证星河科技裁员的消息", skills)["status"], "clarify")
+
+        class Model:
+            def bind_tools(self, _tools):
+                return self
+
+            async def astream(self, messages):
+                yield AIMessageChunk(content="据公告，星河科技已启动人员调整。[S1]")
+
+        async def exercise(search):
+            graph = await build_agent(memory_db_path=None)
+
+            async def collect(question, thread):
+                return [frame async for frame in stream_events(graph, question, thread)]
+
+            unknown = await collect(followup, "no-context")
+            self.assertIn("你想查证哪件事", unknown[-1]["content"])
+            search.assert_not_called()
+            await collect(event, "event-context")
+            known = await collect(followup, "event-context")
+            self.assertTrue(any(frame.get("reason") == "继续核实上一轮明确的事件" for frame in known))
+            self.assertIn("https://example.com/announcement", known[-1]["content"])
+            isolated = await collect(followup, "another-thread")
+            self.assertIn("你想查证哪件事", isolated[-1]["content"])
+            self.assertEqual(search.call_count, 2)
+            self.assertTrue(all("星河科技" in call.args[0] for call in search.call_args_list))
+            await collect("谢谢", "event-context")
+            after_greeting = await collect(followup, "event-context")
+            self.assertIn("https://example.com/announcement", after_greeting[-1]["content"])
+            await collect("远山科技为什么裁员", "event-context")
+            before = search.call_count
+            ambiguous = await collect(followup, "event-context")
+            self.assertIn("不止一件事", ambiguous[-1]["content"])
+            self.assertEqual(search.call_count, before)
+
+        with (
+            patch("backend.app.agent.service.create_chat_model", return_value=Model()),
+            patch("backend.app.agent.tools.DDGS") as ddgs,
+        ):
+            search = ddgs.return_value.text
+            search.return_value = [{"href": "https://example.com/announcement", "body": "星河科技已启动人员调整。"}]
+            asyncio.run(exercise(search))
+
+    def test_missing_evidence_can_requery_once_without_showing_rejected_draft(self):
+        import json
+
+        question = "星河科技为什么裁员"
+        source = "https://example.com/announcement"
+        test = self
+
+        class Model:
+            def bind_tools(self, tools):
+                return self
+
+            async def astream(self, messages):
+                if "校验反馈" in messages[-1].content:
+                    payload = json.loads(messages[-1].content)
+                    test.assertEqual(len(payload["已尝试"]), 1)
+                    yield AIMessageChunk(content='{"query":"星河科技 人员调整 公告"}')
+                elif any(isinstance(message, ToolMessage) and message.status == "success" for message in messages):
+                    yield AIMessageChunk(content="据公司公告，人员调整已经启动，公告未说明具体原因。[S1]")
+                else:
+                    yield AIMessageChunk(content="这是一段未经核验的草稿。")
+
+        async def collect():
+            graph = await build_agent(memory_db_path=None, initial_question=question)
+            return [event async for event in stream_events(graph, question, "evidence-retry")]
+
+        with (
+            patch("backend.app.agent.service.create_chat_model", return_value=Model()),
+            patch("backend.app.agent.tools.DDGS") as search,
+        ):
+            for records in ([{"href": source, "body": "公司宣布启动人员调整，未披露原因。"}], []):
+                search.return_value.text.reset_mock(side_effect=True)
+                search.return_value.text.side_effect = [[], records]
+                events = asyncio.run(collect())
+                self.assertEqual(search.return_value.text.call_count, 2)
+                self.assertEqual(sum(event["type"] == "evidence_retry" for event in events), 1)
+                self.assertNotIn("未经核验的草稿", events[-1]["content"])
+                self.assertEqual(source in events[-1]["content"], bool(records))
+
     def test_evaluates_supported_arithmetic(self):
         self.assertEqual(evaluate_expression("(17 + 3) * 2"), 40)
+
+    def test_evidence_retry_rejects_equivalent_queries_and_urls(self):
+        from backend.app.agent.evidence_retry import validated_query
+
+        call = AIMessage(content="", tool_calls=[
+            {"name": "web_search", "id": "first", "args": {"query": "星河科技 裁员"}},
+        ])
+        self.assertIsNone(validated_query('{"query":"星河科技，裁员"}', [call]))
+        self.assertIsNone(validated_query('{"query":"https://example.com"}', [call]))
+        self.assertEqual(validated_query('{"query":"星河科技 人员调整"}', [call]), "星河科技 人员调整")
+
+    def test_concrete_event_checks_search_first_and_general_questions_can_answer_directly(self):
+        test = self
+        question = "黄仁勋为什么辞职"
+        skills = load_skills(SKILLS_DIR)
+        self.assertTrue(classify(question, skills)["requires_web_evidence"])
+        self.assertTrue(classify("星河科技是不是已经裁员了", skills)["requires_web_evidence"])
+        self.assertTrue(classify("人们为什么会辞职", skills)["general"])
+
+        class FakeModel:
+            def bind_tools(self, tools):
+                test.assertEqual([tool.name for tool in tools], ["web_search"])
+                return self
+
+            async def astream(self, messages):
+                if isinstance(messages[-1], ToolMessage):
+                    yield AIMessageChunk(content="该事件已经证实。")
+                else:
+                    test.assertEqual(messages[-1].content, "人们为什么会辞职")
+                    yield AIMessageChunk(content="常见原因包括职业发展和工作环境。")
+
+        async def collect(text):
+            graph = await build_agent(memory_db_path=None, initial_question=text)
+            return [event async for event in stream_events(graph, text, "event-routing")]
+
+        with (
+            patch("backend.app.agent.service.create_chat_model", return_value=FakeModel()),
+            patch("backend.app.agent.tools.DDGS") as search,
+        ):
+            search.return_value.text.return_value = []
+            direct = asyncio.run(collect("人们为什么会辞职"))
+            self.assertEqual(direct[-1]["content"], "常见原因包括职业发展和工作环境。")
+            search.return_value.text.assert_not_called()
+            checked = asyncio.run(collect(question))
+            search.return_value.text.assert_called_once_with("黄仁勋 辞职 官方公告 核实", max_results=5)
+            self.assertIn("暂时无法确认是否发生", checked[-1]["content"])
+            self.assertNotIn("该事件已经证实", checked[-1]["content"])
+            search.return_value.text.return_value = [
+                {"href": "https://example.com/interview", "body": "黄仁勋出席了一场采访。"},
+            ]
+            checked = asyncio.run(collect(question))
+            self.assertIn("无法根据可引用资料确认", checked[-1]["content"])
+            self.assertIn("https://example.com/interview", checked[-1]["content"])
+            self.assertNotIn("该事件已经证实", checked[-1]["content"])
 
     def test_rejects_code(self):
         with self.assertRaises(ValueError):

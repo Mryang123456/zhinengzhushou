@@ -11,7 +11,7 @@
 ## 能力边界
 
 - 使用 GPT 回答问题；
-- 可在任意回合按需连续调用：受限的 `calculator`、`get_weather`（城市当前天气）和 `web_search`（联网检索）；
+- 可在任意回合按需连续调用：受限的 `calculator`、`get_weather`（任意地点的当前天气、指定日期及1～7天预报）和 `web_search`（联网检索）；
 - 默认还会作为 MCP 客户端连接 `backend/config/mcp.json` 中配置的服务：本地天气 MCP 与 DDGS 搜索服务；其工具会以 `weather_`、`search_` 前缀加入同一个 LangGraph `ToolNode`；
 - 联网工具只读取公开信息，不具备文件、Shell 或网络写入权限；
 - 使用同一个 `--thread-id` 时保留对话检查点；配置 PostgreSQL 后可跨进程、跨重启恢复；
@@ -306,6 +306,24 @@ START → agent → tools? → agent → END
 - 刷新后的待审批卡片使用原任务 ID 发送确认。服务端核对任务归属、审批有效期和一次性令牌状态。
 
 worker 崩溃后，下一次取得会话锁的 worker 会读取持久化 Checkpoint，从待执行节点继续。接管期间跳过记忆写入和需要审批的 MCP 操作，降低外部副作用重复执行的风险。每个 API 进程默认运行两个 worker，可通过 `AGENT_RUN_WORKERS` 调整，连接池至少预留一个连接用于 HTTP 查询。生产部署使用现有的认证、Redis 和 PostgreSQL 配置。Windows 上本地验证异步 PostgreSQL 时，启动进程需要使用 `asyncio.SelectorEventLoop`。
+
+启用会话持久化时，在项目根目录的 `.env.local` 设置 `CHECKPOINT_DATABASE_URL`，使用已建好的 PostgreSQL 库。Worker 使用会话级 advisory lock，数据库地址应指向直连端点或会话模式连接池；事务模式连接池无法保证同一锁的会话归属。按 API 进程数乘以 `CHECKPOINT_POOL_MAX_SIZE` 预估连接上限，并为迁移和其他服务留出连接。
+
+在 Windows 上从项目根目录启动：
+
+```powershell
+python -m backend.app.api.launch --host 127.0.0.1 --port 8000
+```
+
+保留相同账号和会话 ID，先发送一轮消息，再重启后端并在原会话里追问。此前仅存在浏览器里的历史不会自动写入 PostgreSQL。自动验收可设置独立测试库地址 `TEST_CHECKPOINT_DATABASE_URL`，运行 `python -m unittest backend.tests.test_checkpoint_postgres`，覆盖关闭连接池后的上下文恢复和用户隔离。
+
+生产运维验收：
+
+- 保持 `/healthz` 为进程探针，用 `/readyz` 检查配置的 PostgreSQL、Redis 和聊天 worker 任务存活状态。将 `backend/config/alerts.yml` 加到内部 Prometheus 的 `rule_files`，以 `zhixing-agent` 为 job 名抓取 `/metrics`，并配置通知接收器。发布前触发一次依赖异常，确认通知能送达。
+- 账号停用通过 `AUTH_DISABLED_USERS` 配置（逗号分隔）。更新 `JWT_TOKEN_VERSION` 并部署到全部实例可使旧令牌失效。密钥更换使用部署平台的密钥管理，现有连接需要单独终止。生产默认关闭 MCP；配置真实的隔离执行环境后再启用 `AGENT_MCP_ENABLED=true`，并验证隔离边界。
+- 将 Checkpoint 所用的数据库纳入备份计划，同时备份同库的聊天任务和事件表。定期恢复至隔离环境，核对旧会话续聊、事件回放、账号隔离和两个 API 实例争用同一会话时的恢复结果。保留备份时间、恢复耗时和验证记录。
+
+登录且启用 PostgreSQL 后，网页会在登录或窗口重新聚焦时读取 `GET /chat/sessions`。接口按当前账号恢复最近 30 个会话，每个最多读取最近 30 条已完成问答。草稿、会话改名和归档保存在当前浏览器。这里的读取上限不代表服务器删除期限。归档仅隐藏会话，删除服务器内容时应同时考虑 LangGraph Checkpoint、聊天任务及运行事件，并按部署的数据保留策略处理备份和日志。
 
 Web 请求按用户和会话串行写入 Checkpoint。等待上一轮完成的默认上限为 120 秒，可用 `AGENT_THREAD_QUEUE_TIMEOUT_SECONDS` 调整。使用 PostgreSQL 时，服务会在同一连接上持有会话级咨询锁并写入 Checkpoint。数据库地址应使用直连或会话池模式。
 

@@ -5,7 +5,7 @@ import { ConnectionSettings } from "../../components/ConnectionSettings";
 import { MessageList } from "../../components/MessageList";
 import { Sidebar } from "../../components/Sidebar";
 import { useConnectionStatus } from "../../hooks/useConnectionStatus";
-import { login } from "../../services/agentApi";
+import { loadRemoteSessions, login } from "../../services/agentApi";
 import { loadSessions, sessionStorageKey } from "../../services/sessionStorage";
 import type { Session } from "../../types";
 import { useChatMessages } from "./useChatMessages";
@@ -63,6 +63,22 @@ function AccountChat({ storageKey, userId, accessToken, apiKey, setApiKey, login
   const [restored, setRestored] = useState(Boolean(savedSessions));
   const connection = useConnectionStatus(API_URL, apiKey, accessToken);
   const chat = useChatSessions(storageKey, savedSessions);
+  const { syncSessions } = chat;
+  useEffect(() => {
+    if (!accessToken) return;
+    const controller = new AbortController();
+    const sync = () => {
+      void loadRemoteSessions(API_URL, apiKey, accessToken, controller.signal)
+        .then((sessions) => { if (!controller.signal.aborted) syncSessions(sessions); })
+        .catch(() => { /* 本地记录仍可用，下一次窗口聚焦重试。 */ });
+    };
+    sync();
+    window.addEventListener("focus", sync);
+    return () => {
+      controller.abort();
+      window.removeEventListener("focus", sync);
+    };
+  }, [accessToken, apiKey, syncSessions]);
   const { activeSession } = chat;
   const messages = useChatMessages({
     apiUrl: API_URL, apiKey, accessToken, activeSession,

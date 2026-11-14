@@ -8,13 +8,31 @@
     "toolPolicies": {
       "weather_current_weather": {
         "arguments": {
-          "location": {"type": "string", "required": true, "minLength": 1, "maxLength": 80}
+          "location": {"type": "string", "required": true, "minLength": 1, "maxLength": 80},
+          "date": {"type": "string", "minLength": 1, "maxLength": 32},
+          "days": {"type": "integer", "minimum": 1, "maximum": 7}
+        }
+      },
+      "search_search_news": {
+        "arguments": {
+          "query": {"type": "string", "required": true, "minLength": 1, "maxLength": 500},
+          "region": {"type": "string", "pattern": "^[a-z]{2}-[a-z]{2}$"},
+          "timelimit": {"type": "string", "enum": ["d", "w", "m", "y"]},
+          "max_results": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5}
+        }
+      },
+      "search_search_text": {
+        "arguments": {
+          "query": {"type": "string", "required": true, "minLength": 1, "maxLength": 500},
+          "region": {"type": "string", "pattern": "^[a-z]{2}-[a-z]{2}$"},
+          "timelimit": {"type": "string", "enum": ["d", "w", "m", "y"]},
+          "max_results": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5}
         }
       },
       "search_": {
         "arguments": {
           "query": {"type": "string", "required": true, "minLength": 1, "maxLength": 500},
-          "max_results": {"type": "integer", "minimum": 1, "maximum": 8}
+          "max_results": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5}
         }
       }
     },

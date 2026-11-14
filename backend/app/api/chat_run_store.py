@@ -96,6 +96,32 @@ class ChatRunStore:
             )
             return await cursor.fetchall()
 
+    async def recent_sessions(self, user_id):
+        """从已提交的最终事件读回最近的会话与问答。"""
+        async with self.pool.connection() as conn:
+            cursor = await conn.execute("""
+                WITH recent AS (
+                    SELECT thread_id, max(position) AS newest FROM chat_runs
+                    WHERE user_id = %s AND status = 'completed'
+                    GROUP BY thread_id ORDER BY newest DESC LIMIT 30
+                )
+                SELECT recent.thread_id, runs.message_id, runs.question, runs.finished_at, answer.content
+                FROM recent JOIN LATERAL (
+                    SELECT * FROM (
+                        SELECT DISTINCT ON (message_id) id, message_id,
+                            min(position) OVER (PARTITION BY message_id) AS position,
+                            payload->>'question' AS question, finished_at
+                        FROM chat_runs WHERE user_id = %s AND thread_id = recent.thread_id AND status = 'completed'
+                        ORDER BY message_id, position DESC
+                    ) latest ORDER BY position DESC LIMIT 30
+                ) runs ON TRUE JOIN LATERAL (
+                    SELECT payload->>'content' AS content FROM chat_run_events
+                    WHERE run_id = runs.id AND payload->>'type' = 'done' ORDER BY id DESC LIMIT 1
+                ) answer ON TRUE
+                ORDER BY recent.newest DESC, runs.position
+            """, (user_id, user_id))
+            return await cursor.fetchall()
+
     @staticmethod
     async def candidates(conn, after):
         cursor = await conn.execute(

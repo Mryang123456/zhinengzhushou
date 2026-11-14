@@ -21,10 +21,12 @@ from backend.app.agent.turn_gate import ThreadTurnGate, TurnQueueTimeout
 from backend.app.agent.turns import checkpoint_config, checkpoint_scope, stream_events
 from backend.app.api.chat_run_store import ChatRunStore, SubmissionConflict, TERMINAL
 from backend.app.api.chat_run_worker import run_chat_worker
+from backend.app.api.readiness import dependency_status, queue_metrics
 from backend.app.config import MCP_APPROVAL_DB_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE
 from backend.app.mcp.approval import create_approval_store
-from backend.app.mcp.governance import McpOutcomeUnknown, RISK_ORDER, invoke_governed, is_registered_tool, load_governance, load_mcp_connections, risk_for_tool, validate_tool_arguments
+from backend.app.mcp.governance import McpOutcomeUnknown, RISK_ORDER, invoke_governed, is_registered_tool, load_governance, load_mcp_connections, mcp_enabled, risk_for_tool, validate_tool_arguments
 from backend.app.models.factory import ModelConfigurationError, ensure_model_ready, get_model_settings
+from backend.app.intent.policy import casual_reply
 from backend.app.security import AuthenticationError, AuthenticatedUser, authenticate_bearer, auth_required, create_rate_limiter, issue_access_token, login_rate_identity, validate_multi_instance_configuration, validate_production_configuration, valid_api_key, verify_bootstrap_credentials
 from backend.app.observability import event, observe_duration, prometheus_metrics, trace_id
 from backend.app.content_safety import is_direct_prompt_override
@@ -39,6 +41,10 @@ async def lifespan(application: FastAPI):
     application.state.chat_runs = None
     pool = None
     workers = []
+    if mcp_enabled() and os.getenv("ENVIRONMENT", "").strip().lower() in {"prod", "production"}:
+        load_mcp_connections(MCP_CONFIG_FILE)
+    application.state.chat_workers = workers
+    application.state.redis_probe = None
     if database_url:
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -65,7 +71,7 @@ async def lifespan(application: FastAPI):
             application.state.checkpointer = checkpointer
             application.state.chat_runs = store
             worker_count = min(pool_size - 1, max(1, int(os.getenv("AGENT_RUN_WORKERS", "2"))))
-            workers = [asyncio.create_task(run_chat_worker(store)) for _ in range(worker_count)]
+            workers.extend(asyncio.create_task(run_chat_worker(store)) for _ in range(worker_count))
         except Exception:
             # 已创建的连接池也必须关闭，避免启动失败后遗留连接。
             pool = pool or getattr(application.state, "checkpoint_pool", None)
@@ -73,6 +79,9 @@ async def lifespan(application: FastAPI):
                 await pool.close()
             raise
     try:
+        if redis_url := os.getenv("REDIS_URL"):
+            from redis.asyncio import Redis
+            application.state.redis_probe = Redis.from_url(redis_url, socket_connect_timeout=1, socket_timeout=1)
         yield
     finally:
         for worker in workers:
@@ -83,6 +92,8 @@ async def lifespan(application: FastAPI):
         pool = getattr(application.state, "checkpoint_pool", None)
         if pool:
             await pool.close()
+        if application.state.redis_probe is not None:
+            await application.state.redis_probe.aclose()
 
 
 app = FastAPI(title="基础智能体流式服务", lifespan=lifespan)
@@ -156,10 +167,31 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+async def readiness_checks(state):
+    return await dependency_status(
+        state,
+        postgres_required=bool(os.getenv("CHECKPOINT_DATABASE_URL")),
+        redis_required=bool(os.getenv("REDIS_URL")),
+    )
+
+
+@app.get("/readyz")
+async def readyz(request: Request, response: Response):
+    checks = await readiness_checks(request.app.state)
+    ready = all(checks.values())
+    response.status_code = 200 if ready else 503
+    return {"status": "ready" if ready else "not_ready", "checks": checks}
+
+
 @app.get("/metrics", include_in_schema=False)
-async def metrics_endpoint():
+async def metrics_endpoint(request: Request):
     from fastapi.responses import PlainTextResponse
-    return PlainTextResponse(prometheus_metrics(), media_type="text/plain; version=0.0.4")
+    state = request.app.state
+    checks, queue = await asyncio.gather(
+        readiness_checks(state), queue_metrics(getattr(state, "checkpoint_pool", None))
+    )
+    ready = "".join(f'agent_dependency_ready{{dependency="{name}"}} {int(ok)}\n' for name, ok in checks.items())
+    return PlainTextResponse(prometheus_metrics() + ready + queue, media_type="text/plain; version=0.0.4")
 
 
 def service_key_valid(api_key: str | None) -> bool:
@@ -203,6 +235,35 @@ async def current_user(authorization: str | None = Header(default=None)) -> dict
     user = authenticated_user(authorization)
     event("auth_me_read", user_id=user.user_id)
     return {"user_id": user.user_id, "roles": list(user.roles), "authentication_required": auth_required()}
+
+
+@app.get("/chat/sessions")
+async def recent_chat_sessions(
+    response: Response,
+    x_agent_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """返回当前账号近期已完成的对话，不包含工具执行记录。"""
+    response.headers["Cache-Control"] = "no-store"
+    if not service_key_valid(x_agent_api_key):
+        raise HTTPException(status_code=401, detail="访问密钥无效。")
+    user = authenticated_user(authorization)
+    store = getattr(app.state, "chat_runs", None)
+    if store is None or not auth_required():
+        return {"sessions": []}
+    sessions = {}
+    for thread, message, question, finished_at, answer in await store.recent_sessions(user.user_id):
+        if not isinstance(question, str) or not isinstance(answer, str):
+            continue
+        title = " ".join(question.split())[:24] or "同步会话"
+        item = sessions.setdefault(thread, {"id": thread, "title": title, "messages": [], "updatedAt": 0})
+        item["messages"].extend((
+            {"id": str(message), "role": "user", "content": question},
+            {"id": f"{message}:answer", "role": "assistant", "content": answer},
+        ))
+        if finished_at:
+            item["updatedAt"] = max(item["updatedAt"], int(finished_at.timestamp() * 1000))
+    return {"sessions": list(sessions.values())}
 
 
 @app.get("/connection/status")
@@ -301,7 +362,8 @@ async def chat_stream(
         event("prompt_override_rejected", user_id=user.user_id)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请求包含试图覆盖系统安全规则的内容，已拒绝处理。")
     try:
-        ensure_model_ready(get_model_settings())
+        if not casual_reply(request.question):
+            ensure_model_ready(get_model_settings())
     except ModelConfigurationError as error:
         raise HTTPException(status_code=500, detail=f"模型配置错误：{error}") from error
 
@@ -316,7 +378,7 @@ async def chat_stream(
         try:
             run_id = await store.submit(user.user_id, request.thread_id, message_id, attempt_id, {
                 "question": request.question, "retry": request.retry,
-                "use_memory": request.use_memory, "use_mcp": request.use_mcp,
+                "use_memory": request.use_memory, "use_mcp": request.use_mcp and mcp_enabled(),
             })
         except SubmissionConflict as error:
             raise HTTPException(409, detail=str(error)) from error
@@ -329,7 +391,7 @@ async def chat_stream(
         async with thread_turn_gate.hold(thread_key, wait_seconds, pool) as connection:
             run_seconds = float(os.getenv("AGENT_REQUEST_TIMEOUT_SECONDS", "90"))
             deadline.reschedule(asyncio.get_running_loop().time() + run_seconds)
-            mcp_config = MCP_CONFIG_FILE if request.use_mcp else None
+            mcp_config = MCP_CONFIG_FILE if request.use_mcp and mcp_enabled() else None
             memory_db = MEMORY_DB_FILE if request.use_memory else None
             shared_checkpointer = getattr(app.state, "checkpointer", None)
             if connection is not None:
@@ -423,6 +485,8 @@ async def confirm_mcp_approval(
     verify_request(http_request, x_agent_api_key)
     user = authenticated_user(authorization)
     token = confirmation.confirmation_token
+    if not mcp_enabled():
+        raise HTTPException(status_code=503, detail="当前环境未启用 MCP 工具。")
     store = getattr(app.state, "chat_runs", None)
     if token is None and store is not None and confirmation.run_id is not None:
         token = await store.approval_token(user.user_id, confirmation.run_id, approval_id)

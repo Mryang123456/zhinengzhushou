@@ -23,3 +23,5 @@ CREATE TABLE IF NOT EXISTS chat_run_events (
     payload JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_run_events_cursor ON chat_run_events(run_id, id);
+CREATE INDEX IF NOT EXISTS chat_runs_completed_sessions ON chat_runs(user_id, thread_id, position DESC)
+    WHERE status = 'completed';

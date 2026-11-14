@@ -16,6 +16,17 @@ from backend.app.security import AuthenticatedUser
 
 
 class ChatStreamTests(unittest.TestCase):
+    def test_greeting_returns_a_token_without_initializing_a_model(self):
+        async def collect():
+            graph = await build_agent(memory_db_path=None, initial_question="你好！")
+            return [frame async for frame in stream_events(graph, "你好！", "greeting-fast-path")]
+
+        with patch("backend.app.agent.service.create_chat_model") as create_model:
+            frames = asyncio.run(collect())
+        create_model.assert_not_called()
+        self.assertEqual([frame["content"] for frame in frames if frame["type"] == "token"], [frames[-1]["content"]])
+        self.assertNotIn("tool_start", [frame["type"] for frame in frames])
+
     def test_stream_events_include_token_tool_and_done(self):
         class FakeGraph:
             async def astream(self, *_args, **_kwargs):
@@ -103,7 +114,7 @@ class ChatStreamTests(unittest.TestCase):
                     self.assertIn("web_search", model.bound_tools)
                 else:
                     discovery.assert_not_awaited()
-                    self.assertEqual(model.bound_tools, ())
+                    self.assertEqual(model.bound_tools, ("web_search",))
 
     def test_local_web_checkpoint_preserves_turns_and_isolates_threads(self):
         from fastapi.testclient import TestClient

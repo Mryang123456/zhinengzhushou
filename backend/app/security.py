@@ -74,6 +74,7 @@ def issue_access_token(user: AuthenticatedUser) -> str:
         "aud": os.getenv("JWT_AUDIENCE", "zhixing-web"),
         "iat": now,
         "exp": now + timedelta(minutes=expires_minutes),
+        "ver": os.getenv("JWT_TOKEN_VERSION", "1"),
     }
     return jwt.encode(payload, _jwt_secret(), algorithm="HS256")
 
@@ -96,9 +97,18 @@ def authenticate_bearer(authorization: str | None) -> AuthenticatedUser:
         roles = claims.get("roles", ["user"])
         if not isinstance(user_id, str) or not user_id or not isinstance(roles, list) or not all(isinstance(role, str) for role in roles):
             raise AuthenticationError("令牌主体格式无效。")
+        if claims.get("ver", "1") != os.getenv("JWT_TOKEN_VERSION", "1"):
+            raise AuthenticationError("访问令牌已撤销。")
+        if not account_enabled(user_id):
+            raise AuthenticationError("账号已停用。")
         return AuthenticatedUser(user_id, tuple(roles))
     except (jwt.PyJWTError, KeyError, AuthenticationError) as error:
         raise AuthenticationError("访问令牌无效或已过期。") from error
+
+
+def account_enabled(user_id: str) -> bool:
+    disabled = {value.strip() for value in os.getenv("AUTH_DISABLED_USERS", "").split(",") if value.strip()}
+    return user_id not in disabled
 
 
 def verify_bootstrap_credentials(username: str, password: str) -> AuthenticatedUser | None:
@@ -107,7 +117,9 @@ def verify_bootstrap_credentials(username: str, password: str) -> AuthenticatedU
     configured_hash = os.getenv("AUTH_BOOTSTRAP_PASSWORD_HASH", "")
     if not configured_user or not configured_hash:
         return None
-    if not hmac.compare_digest(username, configured_user) or not verify_password(password, configured_hash):
+    if not hmac.compare_digest(username.encode(), configured_user.encode()) or not verify_password(password, configured_hash):
+        return None
+    if not account_enabled(configured_user):
         return None
     return AuthenticatedUser(configured_user)
 

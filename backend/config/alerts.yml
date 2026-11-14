@@ -1,0 +1,30 @@
+groups:
+  - name: agent-p0
+    rules:
+      - alert: AgentMetricsUnavailable
+        expr: up{job="zhixing-agent"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "无法抓取 Agent 指标" }
+      - alert: AgentDependencyUnavailable
+        expr: agent_dependency_ready == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "Agent 的配置依赖未就绪" }
+      - alert: AgentQueueBacklog
+        expr: agent_chat_queue_oldest_seconds > 60
+        for: 2m
+        labels: { severity: warning }
+        annotations: { summary: "聊天队列有任务等待超过 60 秒" }
+      - alert: AgentRecoveryExhausted
+        expr: increase(agent_events_total{event="chat_recovery_exhausted"}[10m]) > 0
+        labels: { severity: critical }
+        annotations: { summary: "聊天任务耗尽接管次数" }
+      - alert: AgentMcpFailureRate
+        expr: >-
+          sum(increase(agent_events_total{event=~"mcp_tool_failed|mcp_tool_outcome_unknown"}[10m]))
+          / clamp_min(sum(increase(agent_events_total{event=~"mcp_tool_success|mcp_tool_failed|mcp_tool_outcome_unknown"}[10m])), 1) > 0.2
+          and sum(increase(agent_events_total{event=~"mcp_tool_failed|mcp_tool_outcome_unknown"}[10m])) >= 5
+        for: 2m
+        labels: { severity: warning }
+        annotations: { summary: "MCP 调用失败率超过 20%" }

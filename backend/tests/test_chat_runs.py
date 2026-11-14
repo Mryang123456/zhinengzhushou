@@ -17,6 +17,28 @@ from backend.app.security import AuthenticatedUser
 
 
 class ChatRunTests(unittest.TestCase):
+    def test_session_history_only_reads_authenticated_account_and_returns_final_text(self):
+        from datetime import datetime, timezone
+
+        message_id = uuid4()
+        store = SimpleNamespace(recent_sessions=AsyncMock(return_value=[
+            ("test-thread", message_id, "杭州天气", datetime.now(timezone.utc), "已有预报。"),
+        ]))
+        with (
+            patch.object(server.app.state, "chat_runs", store, create=True),
+            patch.object(server, "service_key_valid", return_value=True),
+            patch.object(server, "authenticated_user", return_value=AuthenticatedUser("owner")),
+            patch.object(server, "auth_required", return_value=True),
+        ):
+            response = TestClient(server.app).get("/chat/sessions?user_id=another")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            self.assertEqual(response.json()["sessions"][0]["messages"], [
+                {"id": str(message_id), "role": "user", "content": "杭州天气"},
+                {"id": f"{message_id}:answer", "role": "assistant", "content": "已有预报。"},
+            ])
+            store.recent_sessions.assert_awaited_once_with("owner")
+
     def test_submission_recovery_reuses_initial_and_retry_request_keys(self):
         run_id, message_id, attempt_id = uuid4(), uuid4(), uuid4()
         store = SimpleNamespace(

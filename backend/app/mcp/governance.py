@@ -13,8 +13,15 @@ from langchain_core.tools import ToolException
 
 from backend.app.config import PROJECT_ROOT
 from backend.app.content_safety import TOOL_OUTPUT_MAX_CHARS, sanitize_untrusted_text
+from backend.app.observability import increment
+from backend.app.security import is_production_environment
 
 RISK_ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
+
+
+def mcp_enabled() -> bool:
+    default = "false" if is_production_environment() else "true"
+    return os.getenv("AGENT_MCP_ENABLED", default).strip().lower() in {"1", "true", "yes"}
 
 
 class ToolPolicyError(ValueError):
@@ -36,7 +43,7 @@ def validate_mcp_servers(config: dict) -> None:
     policies = governance.get("serverPolicies", {})
     if set(servers) != set(policies) or set(servers) != set(governance.get("allowedServers", [])):
         raise ToolPolicyError("MCP 服务注册表与实际配置不一致。")
-    require_sandbox = os.getenv("MCP_SANDBOX_REQUIRED", "false").lower() in {"1", "true", "yes"}
+    require_sandbox = is_production_environment() or os.getenv("MCP_SANDBOX_REQUIRED", "false").lower() in {"1", "true", "yes"}
     for name, server in servers.items():
         policy = policies[name]
         if any(server.get(key) != policy.get(key) for key in ("command", "args", "transport")):
@@ -83,6 +90,25 @@ def is_registered_tool(name: str, governance: dict) -> bool:
     return policy_for_tool(name, governance) is not None
 
 
+def search_tool_with_policy_schema(tool, governance: dict):
+    """让模型看到与搜索工具执行策略一致的参数。"""
+    if not tool.name.startswith("search_") or not isinstance(tool.args_schema, dict):
+        return tool
+    definitions = (policy_for_tool(tool.name, governance) or {}).get("arguments", {})
+    properties = {}
+    for key, provider_property in tool.args_schema.get("properties", {}).items():
+        if key in definitions:
+            properties[key] = {field: value for field, value in definitions[key].items() if field != "required"}
+            if "description" in provider_property:
+                properties[key]["description"] = provider_property["description"]
+    return tool.model_copy(update={"args_schema": {
+        "type": "object",
+        "properties": properties,
+        "required": [key for key in properties if definitions[key].get("required")],
+        "additionalProperties": False,
+    }})
+
+
 def validate_tool_arguments(name: str, arguments: dict, governance: dict) -> dict:
     """拒绝策略外参数，并对类型、长度和数值边界做严格校验。"""
     policy = policy_for_tool(name, governance)
@@ -97,8 +123,9 @@ def validate_tool_arguments(name: str, arguments: dict, governance: dict) -> dic
     for key, definition in definitions.items():
         if definition.get("required") and key not in arguments:
             raise ToolPolicyError(f"缺少必填参数：{key}")
+    defaults = {key: definition["default"] for key, definition in definitions.items() if "default" in definition}
     checked: dict = {}
-    for key, value in arguments.items():
+    for key, value in (defaults | arguments).items():
         definition = definitions[key]
         expected_type = definition.get("type")
         if expected_type == "string":
@@ -106,6 +133,8 @@ def validate_tool_arguments(name: str, arguments: dict, governance: dict) -> dic
                 raise ToolPolicyError(f"参数 {key} 必须是文本。")
             if len(value) < definition.get("minLength", 0) or len(value) > definition.get("maxLength", 4096):
                 raise ToolPolicyError(f"参数 {key} 的长度不符合限制。")
+            if "pattern" in definition and not re.fullmatch(definition["pattern"], value):
+                raise ToolPolicyError(f"参数 {key} 的格式不符合限制。")
         elif expected_type == "integer":
             if not isinstance(value, int) or isinstance(value, bool):
                 raise ToolPolicyError(f"参数 {key} 必须是整数。")
@@ -114,6 +143,8 @@ def validate_tool_arguments(name: str, arguments: dict, governance: dict) -> dic
                 raise ToolPolicyError(f"参数 {key} 必须是数字。")
         elif expected_type == "boolean" and not isinstance(value, bool):
             raise ToolPolicyError(f"参数 {key} 必须是布尔值。")
+        if "enum" in definition and value not in definition["enum"]:
+            raise ToolPolicyError(f"参数 {key} 不在允许的取值范围内。")
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if value < definition.get("minimum", float("-inf")) or value > definition.get("maximum", float("inf")):
                 raise ToolPolicyError(f"参数 {key} 超出允许范围。")
@@ -126,6 +157,8 @@ def sanitize_output(value: object, maximum: int = TOOL_OUTPUT_MAX_CHARS) -> str:
 
 
 def audit(event: dict) -> None:
+    if event.get("status") in {"success", "failed", "outcome_unknown", "policy_blocked"}:
+        increment(f"mcp_tool_{event['status']}")
     path = PROJECT_ROOT / "data" / "mcp_audit.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     safe = {**event, "at": datetime.now(timezone.utc).isoformat()}

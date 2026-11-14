@@ -4,7 +4,6 @@ import ast
 import json
 import math
 import operator
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from ddgs import DDGS
@@ -13,6 +12,7 @@ from langchain_core.tools import ToolException, tool
 from backend.app.knowledge.store import KnowledgeStore, pack_evidence
 from backend.app.memory.store import MemoryStore
 from backend.app.skills.registry import Skill
+from backend.app.weather.service import WeatherQueryError, query_weather, weather_code_description
 
 
 _BINARY_OPERATORS = {
@@ -66,42 +66,13 @@ def _get_json(url: str) -> dict:
         return json.load(response)
 
 
-def weather_code_description(code: int) -> str:
-    descriptions = {
-        0: "晴朗", 1: "大致晴朗", 2: "局部多云", 3: "阴天", 45: "有雾", 48: "雾凇",
-        51: "毛毛雨", 53: "毛毛雨", 55: "强毛毛雨", 61: "小雨", 63: "中雨",
-        65: "大雨", 71: "小雪", 73: "中雪", 75: "大雪", 80: "阵雨",
-        81: "中等阵雨", 82: "强阵雨", 95: "雷暴", 96: "伴冰雹的雷暴", 99: "强冰雹雷暴",
-    }
-    return descriptions.get(code, f"天气代码 {code}")
-
-
 @tool
-def get_weather(location: str) -> str:
-    """查询城市或地点的当前天气，例如“新加坡”或“北京”。"""
+def get_weather(location: str, date: str = "current", days: int = 1) -> str:
+    """查询任意地点的当前天气或未来预报；date支持今天、明天、后天、星期或YYYY-MM-DD，days为1到7。"""
     try:
-        geocode_url = "https://geocoding-api.open-meteo.com/v1/search?" + urlencode(
-            {"name": location, "count": 1, "language": "zh", "format": "json"}
-        )
-        matches = _get_json(geocode_url).get("results", [])
-        if not matches:
-            raise ToolException("未找到指定地点，请检查城市名称。")
-        place = matches[0]
-        forecast_url = "https://api.open-meteo.com/v1/forecast?" + urlencode(
-            {
-                "latitude": place["latitude"],
-                "longitude": place["longitude"],
-                "current": "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m",
-                "timezone": "auto",
-            }
-        )
-        current = _get_json(forecast_url)["current"]
-        return (
-            f"{place['name']}当前天气：{weather_code_description(current['weather_code'])}；"
-            f"气温 {current['temperature_2m']}°C，体感 {current['apparent_temperature']}°C，"
-            f"湿度 {current['relative_humidity_2m']}%，风速 {current['wind_speed_10m']} km/h，"
-            f"降水 {current['precipitation']} mm。"
-        )
+        return query_weather(location, date, days, _get_json)
+    except WeatherQueryError as error:
+        raise ToolException(str(error)) from error
     except (KeyError, OSError, TimeoutError, ValueError) as error:
         raise ToolException("天气服务暂未返回可用数据。") from error
 
