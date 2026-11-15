@@ -29,6 +29,8 @@ export function useChatMessages({ apiUrl, apiKey, accessToken, activeSession, up
   const resumedRuns = useRef(new Set<string>());
   const canRetry = !isSending && lastReply?.role === "assistant" && !lastReply.pending
     && lastReply.retryable && (!lastReply.approval || lastReply.resume) && lastQuestion?.role === "user";
+  const canRegenerate = !isSending && lastReply?.role === "assistant" && !lastReply.pending && !lastReply.retryable
+    && !lastReply.notice && !lastReply.approval && Boolean(lastReply.content) && lastQuestion?.role === "user";
 
   const updateMessage = (threadId: string, messageId: string, update: (message: Message) => Message) => {
     updateMessages(threadId, (items) => items.map((item) => item.id === messageId ? update(item) : item));
@@ -51,7 +53,10 @@ export function useChatMessages({ apiUrl, apiKey, accessToken, activeSession, up
               ? item : { ...item, resume: { runId: event.run_id, after: "0" }, submission: undefined };
           }
           const updated = applyStreamEvent(item, event, replaceContent);
-          if (event.type === "done" || event.type === "error") return { ...updated, resume: undefined, submission: undefined };
+          if (event.type === "done") {
+            return { ...updated, resume: undefined, submission: undefined, completedRunId: item.resume?.runId, completedAt: undefined };
+          }
+          if (event.type === "error") return { ...updated, resume: undefined, submission: undefined };
           if (updated.resume && event.event_id) return { ...updated, resume: { ...updated.resume, after: event.event_id } };
           return updated;
         });
@@ -86,9 +91,17 @@ export function useChatMessages({ apiUrl, apiKey, accessToken, activeSession, up
     if (!canRetry || !lastReply || !lastQuestion || isRunning(sessionId)) return;
     const resume = lastReply.resume;
     updateMessage(sessionId, lastReply.id, (item) => ({
-      ...item, pending: true, notice: undefined, toolEvents: resume ? item.toolEvents : [],
+      ...item, pending: true, notice: undefined, elapsedMs: undefined, toolEvents: resume ? item.toolEvents : [],
     }));
     void runReply(sessionId, lastReply.id, lastQuestion, { retry: !resume, resume, recover: lastReply.submission });
+  };
+
+  const regenerateLastReply = () => {
+    if (!canRegenerate || !lastReply || !lastQuestion || isRunning(sessionId)) return;
+    updateMessage(sessionId, lastReply.id, (item) => ({
+      ...item, content: "", sources: undefined, elapsedMs: undefined, pending: true, retryable: true, toolEvents: [],
+    }));
+    void runReply(sessionId, lastReply.id, lastQuestion, { retry: true });
   };
 
   useEffect(() => {
@@ -138,6 +151,8 @@ export function useChatMessages({ apiUrl, apiKey, accessToken, activeSession, up
     },
     retryMessageId: canRetry ? lastReply.id : undefined,
     retryLastReply,
+    regenerateMessageId: canRegenerate ? lastReply.id : undefined,
+    regenerateLastReply,
     confirmApproval,
   };
 }

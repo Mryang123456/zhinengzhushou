@@ -9,7 +9,7 @@ ALIASES = {
     "联网调研": ("网上查", "帮我找", "搜一下", "资料收集", "市场研究", "新闻动态", "最新消息"),
     "出行规划": ("去哪玩", "旅行安排", "旅游攻略", "路线安排", "行程安排", "出游"),
 }
-MATH_PATTERN = re.compile(r"^[\d\s+\-*/%().]+$|\b(计算|算一下|求值)\b", re.I)
+MATH_PATTERN = re.compile(r"^[\d\s+\-*/%().]+$|(?:计算|算一下|求值)\s*[(:：+\-]?\s*\d", re.I)
 CASUAL_PATTERN = re.compile(r"^(你好|嗨|谢谢|帮助|你能做什么)[！!？?。\s]*$")
 CASUAL_REPLIES = {
     "你好": "你好！今天想聊些什么？",
@@ -33,6 +33,11 @@ PUBLIC_EVENT_QUESTION = re.compile(
     r"^(?P<subject>.{2,80}?)(?:为什么(?:会|要|突然)?|为何|是不是(?:已经)?|是否(?:已经)?|真的(?:已经)?|"
     r"已经|突然|刚刚|有没有)(?P<event>辞职|离职|卸任|下台|裁员|停产|倒闭|破产|退市|被收购|被撤职|取消|下架)"
     r"(?:了)?(?:吗|么|了吗|的原因是什么)?[？?。！!]*$"
+)
+LOCAL_FOOD_DISCOVERY = re.compile(
+    r"(?:有什么|有哪些|有啥|推荐|必吃|值得吃|美食攻略|特色美食).{0,24}(?:美食|小吃|好吃|特色菜)|"
+    r"(?:美食|小吃|好吃|特色菜).{0,24}(?:推荐|有哪些|有什么|哪里吃)",
+    re.I,
 )
 GENERIC_EVENT_SUBJECT = re.compile(r"(?:人(?:们|类)?|员工|公司|企业|老板|高管|管理者|产品|工厂|(?:一个|一家|某些|有些|部分|某|哪些|什么样的).+)")
 KNOWLEDGE_SOURCE = r"(?:知识库|内部(?:制度|政策|规定|资料|文档|手册)|公司(?:的)?(?:制度|手册))"
@@ -111,6 +116,14 @@ def classify(question: str, skills: list[Skill]) -> dict:
                 "status": "allow", "reason": "具体事件需要联网核实", "skills": [], "confidence": 0.95,
                 "question": "", "requires_web_evidence": True, "web_query": f"{subject} {event['event']} 官方公告 核实",
             }
+    if LOCAL_FOOD_DISCOVERY.search(normalized):
+        query = question.strip()
+        return {
+            "status": "allow", "reason": "开放式美食推荐需要检索公开来源", "skills": [],
+            "confidence": 0.9, "question": "", "requires_web_evidence": True,
+            "local_food_discovery": True,
+            "web_query": query,
+        }
     matched = [(skill, score) for skill, score in ((skill, _score(skill, normalized)) for skill in skills) if score > 0]
     if not matched:
         return {"status": "allow", "reason": "通用问答", "skills": [], "confidence": 0.0, "question": "", "general": True}

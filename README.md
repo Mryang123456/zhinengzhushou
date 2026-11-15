@@ -13,6 +13,9 @@
 - 使用 GPT 回答问题；
 - 可在任意回合按需连续调用：受限的 `calculator`、`get_weather`（任意地点的当前天气、指定日期及1～7天预报）和 `web_search`（联网检索）；
 - 默认还会作为 MCP 客户端连接 `backend/config/mcp.json` 中配置的服务：本地天气 MCP 与 DDGS 搜索服务；其工具会以 `weather_`、`search_` 前缀加入同一个 LangGraph `ToolNode`；
+- 可选设置 `AGENT_DEEPSEEK_FETCH_ENABLED=true` 和 `DEEPSEEK_API_KEY`，为入选的公开网页补充正文证据；默认关闭，启用后会向正文获取服务发送网页 URL，并增加外部请求和耗时；
+- 开放式“某地有什么美食/推荐哪些小吃”问题会并行检索经典菜品、特色小吃、餐厅/美食街三个主题（每主题最多 4 条公开结果），并按栏目组织带来源回答；具体店名、价格和排名只在来源支持时提供；明确要求不联网时仍会遵从并说明限制；
+- 普通联网回答从每个入选网页的正文或搜索摘要中提取与本轮问题相关的原文片段，由模型跨来源汇总。正文按问题选择段落、列表或表格，来源编号会转换为可点击链接。
 - 联网工具只读取公开信息，不具备文件、Shell 或网络写入权限；
 - 使用同一个 `--thread-id` 时保留对话检查点；配置 PostgreSQL 后可跨进程、跨重启恢复；
 - 提供按 `user_id` 隔离的 SQLite 长期记忆；只有用户明确要求“记住”时才保存，支持检索与删除；
@@ -130,7 +133,7 @@ python -m uvicorn backend.app.api.server:app --port 8000
 
 `backend/config/mcp.json` 除服务配置外还包含治理信息：允许服务、工具风险级别、工具参数策略、超时和重试。L0/L1 工具可以自动执行；未登记、私有读取或写入类工具默认 L2。服务端会校验 MCP 服务是否出现在 `allowedServers` 中，并只向模型暴露 `toolPolicies` 已登记的工具。
 
-每个已登记工具必须明确允许参数名、类型和边界；例如天气地点最多 80 个字符，搜索关键词最多 500 个字符、`max_results` 只能在 1 到 8。策略外工具、额外参数、错误类型及超出边界的参数都会在执行前审计并拒绝，审批确认接口也会重新校验同一策略。
+每个已登记工具必须明确允许参数名、类型和边界；例如天气地点最多 80 个字符，搜索关键词最多 500 个字符。每轮进入 Agent 的公开网页结果按链接去重，最多保留 50 个；来源读取受公开 URL 校验和并发控制。策略外工具、额外参数、错误类型及超出边界的参数都会在执行前审计并拒绝，审批确认接口也会重新校验同一策略。
 
 每个 MCP 服务还必须在 `serverPolicies` 中登记其命令、参数和传输方式，实际配置不一致即拒绝加载。工具层默认单批最多 3 次、单回合最多 6 次调用，并分别有单工具 20 秒、单请求 90 秒超时；客户端断开连接时服务会停止流式任务。可通过环境变量调整这些预算。
 
@@ -155,11 +158,11 @@ Skill 匹配后，模型只会看到该 Skill 声明的工具及基础低风险�
 
 每个请求先经过 `backend/app/intent/policy.py`：它会结合显式触发词、同义表达、轻微拼写容错和基础任务规则进行评分；未识别、近似竞争意图或出行缺少地点时，工作流直接返回澄清问题，不调用模型和工具。明确连接词下最多合并两个高置信技能。仅当规则判定通过，才进入 Agent 并生成本回合工具白名单。意图决策会作为 SSE `intent` 事件输出，便于前端和日志系统审计。
 
-回答质量门会校验时效性工具证据、网页链接/知识库引用的可追溯性，以及关键事实是否紧邻其对应证据；无法逐条溯源时会安全降级而不是输出确定性结论。
+回答质量门会校验时效性工具证据、网页链接/知识库引用的可追溯性，以及关键事实是否紧邻其对应证据；无法逐条溯源时会安全降级而不是输出确定性结论。语义搜索结果尚未确认覆盖问题时，工作流会优先进行一次定向补查，不先调用模型修订尚无充分证据支持的草稿。
 
 ## 可观测性与 CI
 
-每个 HTTP 请求会生成或继承 `X-Request-Id`，并写入结构化事件日志；`GET /metrics` 提供 Prometheus 文本格式的基础事件计数。仓库的 `.github/workflows/ci.yml` 会在推送和 PR 时运行后端单元测试、Python 编译检查与前端生产构建。
+每个 HTTP 请求会生成或继承 `X-Request-Id`，并写入结构化事件日志；`GET /metrics` 提供 Prometheus 文本格式的基础事件计数和操作累计耗时。聊天流也会记录当前请求中意图识别、回答生成、证据复核、工具执行等阶段耗时，显示在可展开的查询过程详情中，并随已完成会话恢复。阶段时间可能重叠，不应直接相加当作总耗时。仓库的 `.github/workflows/ci.yml` 会在推送和 PR 时运行后端单元测试、Python 编译检查与前端生产构建。
 
 ## 知识库与 pgvector
 
@@ -234,6 +237,29 @@ python -m backend.evals.rag backend/evals/rag_regression.jsonl --mode fixture -k
 
 ```powershell
 python -m backend.evals.rag .\rag_golden.jsonl --mode live -k 5 --require-hybrid
+```
+
+### 意图路由回归
+
+在项目根目录执行，CI 也会运行同一套固定用例。
+
+```powershell
+python -m backend.evals.intent backend/evals/intent_regression.jsonl
+```
+
+固定模式运行真实 LangGraph 路由和工具执行节点，使用合成对话、固定模型输出和工具替身。报告提供预期路由匹配率、意外工具调用用例比例、缺失工具、语义模型调用次数和耗时。任何用例不符合预期都会使命令返回非零状态。
+
+```powershell
+python -m backend.evals.intent backend/evals/intent_regression.jsonl --mode live
+```
+
+实时模式使用现有模型配置调用首次语义路由，任务拆解、搜索和天气数据继续使用固定替身。报告单列模型调用错误和仅在固定模式运行的用例。仓库中的评估对话为合成数据，实时模式会把相关评估请求交给配置的模型提供商。
+
+复合任务评估也可以启用真实模型拆解，并继续使用固定工具结果验证条件分支和部分失败。
+
+```powershell
+python -m backend.evals.intent backend/evals/planning_regression.jsonl
+python -m backend.evals.intent backend/evals/planning_regression.jsonl --mode live --live-plan
 ```
 
 按业务基线设置 `--min-recall` 与 `--min-no-evidence-accuracy`，低于门槛时命令退出码为 1。合成回归结果用于验证排序与过滤逻辑，真实检索质量以业务评测集的报告为准。
@@ -379,4 +405,3 @@ python -m uvicorn backend.app.api.server:app --host 127.0.0.1 --port 8000
 ```
 
 如果后端设置了 `AGENT_API_KEY`，在前端“连接设置”中填写；该值只保留在当前页面内存中。开发环境的跨域白名单默认为 Vite 的两个本机地址，生产部署请用 `AGENT_CORS_ORIGINS` 配置明确的前端域名。
-

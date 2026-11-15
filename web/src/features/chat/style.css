@@ -21,11 +21,19 @@ body .app-shell {
 }
 
 .app-chat-panel {
+  --chat-column-width: min(900px, calc(100cqi - 40px));
+  container-type: inline-size;
   min-width: 0;
   flex: 1;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+}
+
+@media (max-width: 760px) {
+  .app-chat-panel {
+    --chat-column-width: calc(100cqi - 20px);
+  }
 }
 
 .app-restore-banner {

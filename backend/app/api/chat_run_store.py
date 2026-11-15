@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from psycopg.types.json import Jsonb
 
 from backend.app.agent.turn_gate import thread_lock_key
+from backend.app.api.chat_history import PUBLIC_ACTIVITY
 from backend.app.config import BACKEND_ROOT
 
 TERMINAL = {"completed", "failed", "cancelled"}
@@ -105,7 +106,8 @@ class ChatRunStore:
                     WHERE user_id = %s AND status = 'completed'
                     GROUP BY thread_id ORDER BY newest DESC LIMIT 30
                 )
-                SELECT recent.thread_id, runs.message_id, runs.question, runs.finished_at, answer.content
+                SELECT recent.thread_id, runs.message_id, runs.question, runs.finished_at, answer.content, answer.sources, runs.id,
+                    activity.events, answer.elapsed_ms
                 FROM recent JOIN LATERAL (
                     SELECT * FROM (
                         SELECT DISTINCT ON (message_id) id, message_id,
@@ -115,11 +117,19 @@ class ChatRunStore:
                         ORDER BY message_id, position DESC
                     ) latest ORDER BY position DESC LIMIT 30
                 ) runs ON TRUE JOIN LATERAL (
-                    SELECT payload->>'content' AS content FROM chat_run_events
+                    SELECT payload->>'content' AS content, payload->'sources' AS sources,
+                        payload->'elapsed_ms' AS elapsed_ms FROM chat_run_events
                     WHERE run_id = runs.id AND payload->>'type' = 'done' ORDER BY id DESC LIMIT 1
                 ) answer ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT jsonb_agg(payload ORDER BY id) AS events FROM (
+                        SELECT id, payload FROM chat_run_events
+                        WHERE run_id = runs.id AND payload->>'type' = ANY(%s)
+                        ORDER BY id DESC LIMIT 100
+                    ) events
+                ) activity ON TRUE
                 ORDER BY recent.newest DESC, runs.position
-            """, (user_id, user_id))
+            """, (user_id, user_id, list(PUBLIC_ACTIVITY)))
             return await cursor.fetchall()
 
     @staticmethod
@@ -171,13 +181,17 @@ class ChatRunStore:
 
     async def finish(self, conn, run_id, frame, tokens=()):
         async with conn.transaction():
-            cursor = await conn.execute("SELECT cancel_requested FROM chat_runs WHERE id = %s FOR UPDATE", (run_id,))
-            if (await cursor.fetchone())[0]:
+            cursor = await conn.execute(
+                "SELECT cancel_requested, GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() - created_at)) * 1000)::bigint "
+                "FROM chat_runs WHERE id = %s FOR UPDATE", (run_id,),
+            )
+            cancelled, elapsed_ms = await cursor.fetchone()
+            if cancelled:
                 frame = {"type": "error", "message": "已停止生成。", "retryable": False}
                 status, tokens = "cancelled", ()
             else:
                 status = "completed" if frame["type"] == "done" else "failed"
             for token in tokens:
                 await self.append(conn, run_id, token)
-            await self.append(conn, run_id, frame)
+            await self.append(conn, run_id, {**frame, "elapsed_ms": elapsed_ms})
             await conn.execute("UPDATE chat_runs SET status = %s, finished_at = NOW() WHERE id = %s", (status, run_id))

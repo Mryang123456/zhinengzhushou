@@ -13,7 +13,7 @@ from langchain_core.tools import ToolException
 from backend.app.agent.service import build_agent
 from backend.app.agent.tools import calculator
 from backend.app.agent.turns import checkpoint_config, stream_events
-from backend.app.quality.validator import validate_answer
+from backend.app.quality.validator import renumber_web_citations, supported_web_excerpt, validate_answer, web_answer_sources
 
 
 class AnswerQualityTests(unittest.TestCase):
@@ -152,6 +152,46 @@ class AnswerQualityTests(unittest.TestCase):
             with self.subTest(answer=answer):
                 self.assertFalse(validate_answer("调研数据", answer, messages)["ok"])
 
+    def test_display_citations_are_numbered_in_reading_order(self):
+        first = "https://example.org/venue"
+        second = "https://example.org/stages"
+        answer = f"**冠军决赛场馆**。[来源 25]({first})\n\n## 各阶段举办地点\n\n场馆信息。[来源 4]({second})[来源 25]({first})"
+        self.assertEqual(renumber_web_citations(answer),
+                         f"**冠军决赛场馆**。[来源 1]({first})\n\n## 各阶段举办地点\n\n场馆信息。[来源 2]({second})[来源 1]({first})")
+
+    def test_web_layout_and_partial_answer_keep_independent_verified_facts(self):
+        question = "2026年 英雄联盟总决赛举办地点"
+        link = "https://example.org/venue"
+        record = {"href": link, "body": "The Grand Final will take place at Barclays Center in Brooklyn, New York."}
+        message = ToolMessage(json.dumps([record]), name="web_search", tool_call_id="venue")
+        core = f"冠军决赛在纽约布鲁克林的巴克莱中心举行。[来源]({link})"
+        unsupported = f"赛程共 14 天。[来源]({link})"
+        valid = lambda text: validate_answer(question, text, [message], requires_web_evidence=True)["ok"]
+        self.assertTrue(valid("## 各阶段举办地点\n\n" + core))
+        table = f"| 赛事阶段 | 场馆 |\n| --- | --- |\n| 冠军决赛 | 巴克莱中心 [来源]({link}) |"
+        self.assertTrue(valid("### 🗺️ 各阶段举办地点一览\n\n" + table))
+        self.assertFalse(valid(table.replace("巴克莱中心", "巴克莱中心，容纳 99 人")))
+        self.assertFalse(valid("## 决赛在洛杉矶\n\n" + core))
+        self.assertFalse(valid(core + "\n\n" + unsupported))
+        self.assertEqual(supported_web_excerpt(
+            question, core + "\n\n" + unsupported, [message], strict_text_claims=False,
+        ), core)
+        bad_row = f"| 半决赛 | 有 99 个场馆 [来源]({link}) |"
+        self.assertEqual(supported_web_excerpt(
+            question, core + "\n\n" + table + "\n" + bad_row + "\n\n" + unsupported,
+            [message], strict_text_claims=False,
+        ), core + "\n\n" + table)
+
+    def test_long_clean_source_is_excerpted_and_static_news_questions_need_no_fetch(self):
+        link = "https://example.org/venue"
+        body = "冠军决赛在巴克莱中心举行。" + "选手参加赛前活动。" * 100
+        message = ToolMessage(json.dumps([{"href": link, "body": body}]), name="web_search", tool_call_id="venue")
+        excerpt = web_answer_sources("决赛在哪里举办", [message])[0]["excerpt"]
+        self.assertTrue(excerpt.startswith("冠军决赛在巴克莱中心举行。"))
+        self.assertLessEqual(len(excerpt), 600)
+        self.assertTrue(validate_answer("新闻报道有哪些常见结构", "通常包括标题、导语和正文。", [])["ok"])
+        self.assertFalse(validate_answer("最近有哪些新闻", "有新的报道发布。", [])["ok"])
+
     def test_single_news_source_allows_cited_summary_with_verified_numbers(self):
         source = "https://example.com/news"
         message = ToolMessage(json.dumps({
@@ -176,6 +216,98 @@ class AnswerQualityTests(unittest.TestCase):
                               name="search_search_news", tool_call_id="headline")
         self.assertTrue(validate_answer("最近新闻", f"发布会预告 [链接]({link})", [message])["ok"])
         self.assertFalse(validate_answer("最近新闻", f"发布会已经举行 [链接]({link})", [message])["ok"])
+        self.assertFalse(validate_answer(
+            "赛事举办地点", f"发布会预告 [链接]({link})", [message], strict_text_claims=True,
+        )["ok"])
+
+    def test_numeric_evidence_fallback_does_not_approve_unrelated_text_claims(self):
+        link = "https://example.org/other-event-live"
+        message = ToolMessage(
+            json.dumps([{"url": link, "body": "10月30日KPL年度总决赛淘汰赛直播开始时间为18:00。"}], ensure_ascii=False),
+            name="web_search", tool_call_id="event",
+        )
+        answer = f"赛事举办地为成都。[来源]({link})"
+        self.assertFalse(validate_answer(
+            "2026年11月14日KPL年度总决赛举办地点", answer, [message], strict_text_claims=True,
+        )["ok"])
+
+    def test_reviewed_evidence_accepts_supported_cross_language_paraphrase(self):
+        link = "https://www.youtube.com/watch?v=worlds-final"
+        message = ToolMessage(
+            json.dumps([{
+                "href": link,
+                "title": "Worlds 2026 Final Trailer",
+                "body": "Worlds 2026 final matchup in Brooklyn, NY at the Barclays Center.",
+            }], ensure_ascii=False),
+            name="web_search", tool_call_id="worlds",
+        )
+        answer = f"决赛将在纽约布鲁克林区的巴克莱中心举行。[来源]({link})"
+        self.assertTrue(validate_answer(
+            "2026年英雄联盟全球总决赛举办地点", answer, [message], requires_web_evidence=True,
+        )["ok"])
+        self.assertFalse(validate_answer(
+            "2026年英雄联盟全球总决赛举办地点", answer, [message],
+            requires_web_evidence=True, strict_text_claims=True,
+        )["ok"])
+
+    def test_web_numbers_stay_with_their_subject_period_metric_and_unit(self):
+        link = "https://example.org/earnings"
+        message = ToolMessage(json.dumps({
+            "url": link, "title": "报告编号 999",
+            "body": "星河科技2025年第一季度营收为25亿元，净利润为8亿元。星河科技2025年第二季度营收为8亿元。远海科技2025年第一季度营收为12亿元。",
+            "date": "2025-09-18",
+        }, ensure_ascii=False), name="web_search", tool_call_id="earnings")
+        for text in ("星河科技2025年Q1营业收入是25亿元", "远海科技2025年第一季度的营收为12亿元"):
+            with self.subTest(text=text):
+                self.assertTrue(validate_answer("查财报", f"{text}。[报告]({link})", [message])["ok"])
+        for text in (
+            "星河科技2025年第二季度营收为25亿元", "远海科技2025年第一季度营收为25亿元",
+            "星河科技2025年第一季度净利润为25亿元", "星河科技2025年第一季度营收为25万美元",
+            "星河科技2025年第一季度营收为999亿元", "财报在2025-09-18发布",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(validate_answer("查财报", f"{text}。[报告]({link})", [message])["ok"])
+
+    def test_web_numeric_roles_reject_prior_values_and_changed_count_subjects(self):
+        url = "https://example.org/report"
+        for body, valid, invalid in (
+            ("星河科技第二季度营收从25亿元降至8亿元。", "星河科技第二季度营收为8亿元",
+             "星河科技第二季度营收为25亿元"),
+            ("甲市新增12家医院。", "据该报道，甲市新增12家医院", "乙市新增12家医院"),
+            ("甲市新增12家医院。", "甲市新增12家医院", "甲市新增12家学校"),
+            ("甲市新增12家医院。", "甲市新增12家医院", "甲市关闭12家医院"),
+        ):
+            with self.subTest(invalid=invalid):
+                message = ToolMessage(json.dumps([{"url": url, "body": body}], ensure_ascii=False),
+                                      name="web_search", tool_call_id="result")
+                self.assertTrue(validate_answer("查公开数据", f"{valid}。[来源]({url})", [message])["ok"])
+                self.assertFalse(validate_answer("查公开数据", f"{invalid}。[来源]({url})", [message])["ok"])
+
+    def test_knowledge_claim_uses_matching_original_chunk(self):
+        content = (
+            "引用：knowledge://1#0\n来源：销售报告\n内容：星河科技的一季度营收为25亿元。\n【资料结束】\n"
+            "引用：knowledge://1#1\n来源：销售报告\n内容：星河科技的二季度营收为8亿元。\n【资料结束】"
+        )
+        message = ToolMessage(content, name="search_knowledge_base", tool_call_id="kb")
+        question = "从知识库查询季度营收"
+        self.assertTrue(validate_answer(question, "星河科技的一季度营收为25亿元。 knowledge://1#0", [message])["ok"])
+        self.assertFalse(validate_answer(question, "星河科技的一季度营收为25亿元。 knowledge://1#1", [message])["ok"])
+        self.assertFalse(validate_answer(question, "星河科技的一季度营收为8亿元。 knowledge://1#0", [message])["ok"])
+        mixed = "星河科技的一季度营收为25亿元。星河科技的二季度营收为8亿元。 knowledge://1#0 knowledge://1#1"
+        self.assertFalse(validate_answer(question, mixed, [message])["ok"])
+
+    def test_web_numeric_changes_preserve_direction_and_source_attribution(self):
+        first = "https://example.org/report"
+        second = "https://example.com/report"
+        message = ToolMessage(json.dumps([
+            {"url": first, "body": "星河科技Q2营收同比增长10%。"},
+            {"url": second, "body": "星河科技Q2营收环比下降8%。"},
+        ], ensure_ascii=False), name="web_search", tool_call_id="earnings")
+        question = "查财报"
+        answer = f"星河科技第二季度营收同比上升10%。[来源一]({first})\n\n星河科技第二季度营收环比下滑8%。[来源二]({second})"
+        self.assertTrue(validate_answer(question, answer, [message])["ok"])
+        self.assertFalse(validate_answer(question, answer.replace("同比上升", "环比上升"), [message])["ok"])
+        self.assertFalse(validate_answer(question, answer.replace("环比下滑", "环比上升"), [message])["ok"])
 
     def test_news_summary_accepts_separate_source_lines_and_keeps_item_boundaries(self):
         first = "https://example.com/a"
@@ -197,7 +329,7 @@ class AnswerQualityTests(unittest.TestCase):
         ):
             self.assertFalse(validate_answer("最近新闻", invalid, [message])["ok"])
 
-    def test_news_graph_falls_back_to_verified_search_links(self):
+    def test_news_graph_removes_unregistered_links_without_replacing_answer(self):
         question = "帮我查询黄仁勋最近的新闻"
         source = "https://example.com/news"
         fabricated = "https://example.org/unknown"
@@ -225,11 +357,10 @@ class AnswerQualityTests(unittest.TestCase):
         ):
             search.return_value.text.return_value = [{"href": source, "body": "黄仁勋在发布会上介绍了新品。"}]
             events = asyncio.run(collect())
-        self.assertEqual([event["passed"] for event in events if event["type"] == "quality"], [True])
-        self.assertIn(source, events[-1]["content"])
+        self.assertIn("展示了新产品", events[-1]["content"])
         self.assertNotIn(fabricated, "".join(event["content"] for event in events if event["type"] == "token"))
 
-    def test_event_answer_repairs_draft_into_prose_with_server_rendered_citations(self):
+    def test_web_prose_is_delivered_without_evidence_revision(self):
         question = "星河科技为什么裁员"
         link = "https://example.com/announcement"
         drafts = []
@@ -240,10 +371,7 @@ class AnswerQualityTests(unittest.TestCase):
 
             async def astream(self, messages):
                 drafts.append(messages)
-                if len(drafts) == 1:
-                    yield AIMessageChunk(content="这是未经引用的草稿。")
-                else:
-                    yield AIMessageChunk(content="据公司公告，星河科技已经启动裁员。公告说明了人员调整，但没有交代具体原因。[S1]")
+                yield AIMessageChunk(content="**星河科技已经启动裁员**，公告没有交代具体原因。[S1]\n\n### 公告概览\n\n| 项目 | 说明 |\n| --- | --- |\n| 人员调整 | 已启动 [S1] |")
 
         async def collect():
             graph = await build_agent(memory_db_path=None, initial_question=question)
@@ -256,12 +384,12 @@ class AnswerQualityTests(unittest.TestCase):
             search.return_value.text.return_value = [{"href": link, "body": "公司公告称已开始裁员，未披露原因。"}]
             events = asyncio.run(collect())
             search.return_value.text.assert_called_once()
-        self.assertEqual(len(drafts), 2)
-        self.assertIn("上一版校验原因", drafts[1][-1].content)
+        self.assertEqual(len(drafts), 1)
         answer = events[-1]["content"]
         self.assertIn("没有交代具体原因", answer)
         self.assertIn(f"[来源 1]({link})", answer)
-        self.assertNotIn("未经引用的草稿", "".join(event["content"] for event in events if event["type"] == "token"))
+        self.assertIn("### 公告概览", answer)
+        self.assertIn("| 项目 | 说明 |", answer)
 
     def test_quality_gate_rejects_failed_empty_and_unusable_evidence(self):
         weather_error = ToolMessage("气温 31°C", name="get_weather", tool_call_id="weather", status="error")

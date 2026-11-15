@@ -77,8 +77,8 @@ export function useChatSessions(storageKey: string, savedSessions: Session[] | n
     updateDraft(id, () => "");
   };
 
-  const syncSessions = useCallback((remote: Session[]) => {
-    if (remote.length) setSessions((local) => mergeRemoteSessions(local, remote));
+  const syncSessions = useCallback((remote: Session[], isRunning: (id: string) => boolean) => {
+    if (remote.length) setSessions((local) => mergeRemoteSessions(local, remote, isRunning));
   }, []);
 
   return {

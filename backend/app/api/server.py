@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, model_validator
 from backend.app.agent.service import build_agent, continue_after_approved_mcp
 from backend.app.agent.turn_gate import ThreadTurnGate, TurnQueueTimeout
 from backend.app.agent.turns import checkpoint_config, checkpoint_scope, stream_events
+from backend.app.api.chat_history import serialize_chat_history
 from backend.app.api.chat_run_store import ChatRunStore, SubmissionConflict, TERMINAL
 from backend.app.api.chat_run_worker import run_chat_worker
 from backend.app.api.readiness import dependency_status, queue_metrics
@@ -243,7 +244,7 @@ async def recent_chat_sessions(
     x_agent_api_key: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ):
-    """返回当前账号近期已完成的对话，不包含工具执行记录。"""
+    """返回当前账号近期已完成的对话和公开进度。"""
     response.headers["Cache-Control"] = "no-store"
     if not service_key_valid(x_agent_api_key):
         raise HTTPException(status_code=401, detail="访问密钥无效。")
@@ -251,19 +252,7 @@ async def recent_chat_sessions(
     store = getattr(app.state, "chat_runs", None)
     if store is None or not auth_required():
         return {"sessions": []}
-    sessions = {}
-    for thread, message, question, finished_at, answer in await store.recent_sessions(user.user_id):
-        if not isinstance(question, str) or not isinstance(answer, str):
-            continue
-        title = " ".join(question.split())[:24] or "同步会话"
-        item = sessions.setdefault(thread, {"id": thread, "title": title, "messages": [], "updatedAt": 0})
-        item["messages"].extend((
-            {"id": str(message), "role": "user", "content": question},
-            {"id": f"{message}:answer", "role": "assistant", "content": answer},
-        ))
-        if finished_at:
-            item["updatedAt"] = max(item["updatedAt"], int(finished_at.timestamp() * 1000))
-    return {"sessions": list(sessions.values())}
+    return {"sessions": serialize_chat_history(await store.recent_sessions(user.user_id))}
 
 
 @app.get("/connection/status")
@@ -421,6 +410,7 @@ async def chat_stream(
                         yield frame
 
     async def generate():
+        started = time.monotonic()
         try:
             yield 'event: progress\ndata: {"type":"progress","stage":"preparing"}\n\n'
             async with asyncio.timeout(None) as deadline:
@@ -439,6 +429,8 @@ async def chat_stream(
                             frame = next_event.result()
                         except StopAsyncIteration:
                             break
+                        if frame["type"] == "done":
+                            frame = {**frame, "elapsed_ms": round((time.monotonic() - started) * 1000)}
                         yield f"event: {frame['type']}\ndata: {json.dumps(frame, ensure_ascii=False)}\n\n"
                         next_event = asyncio.create_task(anext(frames))
                 finally:

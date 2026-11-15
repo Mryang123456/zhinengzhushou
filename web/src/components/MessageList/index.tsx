@@ -1,22 +1,29 @@
-import { ArrowDown, Bot, Copy, RotateCcw, UserRound } from "lucide-react";
+import { ArrowDown, Copy, Pencil, RotateCcw } from "lucide-react";
 import { Bubble } from "@ant-design/x";
 import { Button } from "antd";
-import { useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
 import type { Message } from "../../types";
+import { ActivityTimeline } from "../ActivityTimeline";
+import { AnswerSources } from "../AnswerSources";
 import "./style.css";
+
+const AnswerMarkdown = lazy(() => import("../AnswerMarkdown"));
 
 type Props = {
   messages: Message[];
   onConfirmApproval: (messageId: string) => void;
   retryMessageId?: string;
   onRetry: () => void;
+  regenerateMessageId?: string;
+  onRegenerate: () => void;
+  onEditQuestion?: (content: string) => void;
 };
 
 function isNearBottom(viewport: HTMLDivElement) {
   return viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 40;
 }
 
-export function MessageList({ messages, onConfirmApproval, retryMessageId, onRetry }: Props) {
+export function MessageList({ messages, onConfirmApproval, retryMessageId, onRetry, regenerateMessageId, onRegenerate, onEditQuestion }: Props) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
@@ -60,23 +67,24 @@ export function MessageList({ messages, onConfirmApproval, retryMessageId, onRet
   };
 
   const rows = messages.map((message) => {
-    const steps = message.toolEvents ?? [];
-    const status = steps.at(-1) ?? (message.retryable ? "正在重试…" : "正在发送…");
-    return <article className={`chat-messages-message chat-messages-${message.role}`} key={message.id}>
-      <div className="chat-messages-avatar">{message.role === "user" ? <UserRound size={18}/> : <Bot size={20}/>}</div>
+    return <article className={`chat-messages-message chat-messages-${message.role}`} key={message.id} aria-label={message.role === "user" ? "你的消息" : "智行助手的回答"}>
       <div className="chat-messages-message-body">
-        <div className="chat-messages-message-name">{message.role === "user" ? "你" : "智行助手"}</div>
-        {message.pending ? <div className="chat-messages-progress" role="status">{message.content && !message.retryable ? "正在展示回答…" : status}</div> : null}
-        {steps.length > 0 ? <details className="chat-messages-steps">
-          <summary>处理过程</summary>
-          <ol>{steps.map((step, index) => <li key={index}>{step}</li>)}</ol>
-        </details> : null}
+        {message.role === "assistant" ? <ActivityTimeline message={message}/> : null}
         {message.content ? <Bubble
           placement={message.role === "user" ? "end" : "start"}
           variant={message.role === "user" ? "filled" : "borderless"}
-          classNames={{ content: "chat-messages-bubble-content" }}
-          content={<>{message.content}{message.pending && !message.retryable ? <span className="chat-messages-cursor" aria-hidden="true"/> : null}</>}
+          classNames={{
+            root: "chat-messages-bubble",
+            body: "chat-messages-bubble-body",
+            content: "chat-messages-bubble-content",
+          }}
+          content={message.role === "assistant" && !message.pending
+            ? <Suspense fallback={message.content}><AnswerMarkdown content={message.content} sources={message.sources}/></Suspense>
+            : <>{message.content}{message.pending && !message.retryable ? <span className="chat-messages-cursor" aria-hidden="true"/> : null}</>}
         /> : null}
+        {message.role === "assistant" && !message.pending && message.sources?.length
+          ? <AnswerSources sources={message.sources}/>
+          : null}
         {message.notice ? <div className="chat-messages-notice" role="status">{message.notice}</div> : null}
         {message.id === retryMessageId
           ? <Button icon={<RotateCcw size={15}/>} size="small" onClick={onRetry}>重试</Button>
@@ -90,8 +98,18 @@ export function MessageList({ messages, onConfirmApproval, retryMessageId, onRet
             : <span className="chat-messages-approval-status">{message.approval.status === "executing" ? "正在执行…" : message.approval.status === "completed" ? "已完成" : "确认失败或已过期"}</span>}
         </section> : null}
         {message.role === "assistant" && message.content && !message.pending
-          ? <button className="chat-messages-copy" onClick={() => void navigator.clipboard.writeText(message.content)}><Copy size={14}/>复制</button>
+          ? <div className="chat-messages-actions">
+            <button className="chat-messages-action" onClick={() => void navigator.clipboard.writeText(message.content)}><Copy size={14}/>复制</button>
+            {message.id === regenerateMessageId ? <button className="chat-messages-action" onClick={onRegenerate}>
+              <RotateCcw size={14}/>重新生成
+            </button> : null}
+          </div>
           : null}
+        {message.role === "user" && onEditQuestion ? <div className="chat-messages-actions">
+          <button className="chat-messages-action" onClick={() => onEditQuestion(message.content)}>
+            <Pencil size={14}/>编辑后重发
+          </button>
+        </div> : null}
       </div>
     </article>;
   });

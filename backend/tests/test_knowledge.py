@@ -170,13 +170,13 @@ class KnowledgeTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"KNOWLEDGE_DATABASE_URL": "postgresql://test"}),
             patch("backend.app.agent.tools.KnowledgeStore", return_value=store),
-            patch("backend.app.agent.service.load_mcp_connections") as discover,
+            patch("backend.app.agent.service.discover_mcp_tools") as discover,
             patch("backend.app.agent.service.create_chat_model", return_value=FakeModel()),
         ):
             store.search.return_value = [row]
             frames = asyncio.run(collect())
             store.search.assert_called_once_with("最新报销政策", "finance-user")
-            discover.assert_not_called()
+            discover.assert_not_awaited()
             self.assertEqual(frames[-1]["type"], "done")
             self.assertIn("报销额度为 500 元 knowledge://7#0", frames[-1]["content"])
             self.assertIn("无法确认是否已有尚未收录的更新", frames[-1]["content"])

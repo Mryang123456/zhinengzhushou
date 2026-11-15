@@ -1,0 +1,84 @@
+.answer-markdown {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: #202124;
+  font-size: clamp(15px, 1.4vw, 17px);
+  line-height: 1.6;
+}
+
+.answer-markdown > :first-child { margin-top: 0; }
+.answer-markdown > :last-child { margin-bottom: 0; }
+.answer-markdown p, .answer-markdown ul, .answer-markdown ol { margin: 0 0 0.65em; }
+.answer-markdown ul, .answer-markdown ol { padding-inline-start: 1.25em; }
+.answer-markdown li + li { margin-block-start: 0.45em; }
+.answer-markdown li::marker { color: #6b7078; }
+.answer-markdown p { white-space: pre-line; }
+
+.answer-markdown :is(h1, h2, h3, h4, h5, h6) {
+  margin: 1.25em 0 0.5em;
+  line-height: 1.4;
+  font-size: 1.15em;
+}
+
+.answer-markdown :is(h1, h2, h3) { font-size: 1.24em; font-weight: 700; }
+.answer-markdown a { color: #2458b3; text-decoration: underline; }
+.answer-markdown .answer-markdown-citation {
+  display: inline-block;
+  min-width: 1.25em;
+  margin-inline-start: 0.3em;
+  padding: 0 0.35em;
+  border-radius: 0.55em;
+  color: #59616d;
+  background: #f0f1f2;
+  font-size: 0.62em;
+  line-height: 1.45;
+  text-align: center;
+  text-decoration: none;
+  vertical-align: 0.32em;
+  white-space: nowrap;
+}
+.answer-markdown .answer-markdown-citation:is(:hover, :focus-visible) { color: #2349d3; background: #e8eeff; }
+
+.answer-markdown blockquote {
+  margin-inline: 0;
+  padding-inline-start: 1em;
+  border-inline-start: 3px solid #d7deea;
+  color: #536581;
+}
+
+.answer-markdown pre {
+  overflow-x: auto;
+  padding: 0.8em 1em;
+  border-radius: 8px;
+  background: #f1f4f9;
+  white-space: pre;
+}
+
+.answer-markdown :not(pre) > code {
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: #f1f4f9;
+}
+
+.answer-markdown-table {
+  overflow-x: auto;
+  margin: 0.55em 0 0.65em;
+}
+
+.answer-markdown table { width: 100%; min-width: min(420px, 100%); border-collapse: collapse; }
+.answer-markdown :is(th, td) {
+  padding: 0.33em 0.5em;
+  border-bottom: 1px solid #e9e9ec;
+  text-align: start;
+  vertical-align: top;
+}
+.answer-markdown th { font-weight: 500; }
+.answer-markdown :is(th, td):first-child { padding-inline-start: 0; }
+.answer-markdown :is(th, td):last-child { padding-inline-end: 0; }
+.answer-markdown td:first-child { font-weight: 650; }
+
+@media (max-width: 640px) {
+  .answer-markdown :is(th, td) { padding-inline: 0.4em; overflow-wrap: normal; }
+  .answer-markdown table { min-width: 365px; }
+}

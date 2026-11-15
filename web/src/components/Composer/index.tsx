@@ -31,7 +31,8 @@ export function Composer({ value, isSending, onChange, onSubmit, onStop, onTool,
       onCancel={onStop}
       onChange={onChange}
       onSubmit={onSubmit}
-      autoSize={{ minRows: 2, maxRows: 6 }}
+      classNames={{ content: "chat-composer-content", footer: "chat-composer-footer" }}
+      autoSize={{ minRows: 1, maxRows: 6 }}
       placeholder="输入你的问题，支持查询、规划、工具调用与记忆…"
       onKeyDown={(event) => event.nativeEvent.isComposing ? false : undefined}
       suffix={(_, { components: { SendButton, LoadingButton } }) => isSending

@@ -1,18 +1,20 @@
 .chat-composer {
-  width: min(900px, calc(100% - 56px));
-  margin: 0 auto 25px;
+  width: var(--chat-column-width);
+  margin: 0 auto 12px;
   flex-shrink: 0;
+}
+
+.chat-composer .chat-composer-content {
+  padding: 8px 10px 4px;
+}
+
+.chat-composer .chat-composer-footer {
+  padding: 2px 10px 8px;
 }
 
 .chat-composer-tools {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-}
-
-@media (max-width: 760px) {
-  .chat-composer {
-    width: calc(100% - 28px);
-  }
+  gap: 3px;
 }

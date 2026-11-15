@@ -21,8 +21,20 @@ class ChatRunTests(unittest.TestCase):
         from datetime import datetime, timezone
 
         message_id = uuid4()
+        run_id = uuid4()
+        finished = datetime.now(timezone.utc)
+        sources = [{"url": "https://example.org/report", "title": "报告", "domain": "example.org"}]
+        highlights = [{**sources[0], "excerpt": "报告已发布。"}]
         store = SimpleNamespace(recent_sessions=AsyncMock(return_value=[
-            ("test-thread", message_id, "杭州天气", datetime.now(timezone.utc), "已有预报。"),
+            ("test-thread", message_id, "查询报告", finished, "已有报告。", sources, run_id, [
+                {"type": "tool_end", "tools": ["web_search"], "web_result_count": 1, "arguments": {"query": "private"}},
+                {"type": "approval_required", "confirmation_token": "private"},
+                {"type": "evidence_review", "action": "search", "missing": "private"},
+                {"type": "web_queries", "queries": ["查询报告"]},
+                {"type": "web_highlights", "pages": highlights},
+                {"type": "web_pages_read", "pages": sources},
+                {"type": "timing", "operation": "answer_generation", "elapsed_ms": 2340, "private": "omit"},
+            ], 1520),
         ]))
         with (
             patch.object(server.app.state, "chat_runs", store, create=True),
@@ -34,8 +46,15 @@ class ChatRunTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(response.json()["sessions"][0]["messages"], [
-                {"id": str(message_id), "role": "user", "content": "杭州天气"},
-                {"id": f"{message_id}:answer", "role": "assistant", "content": "已有预报。"},
+                {"id": str(message_id), "role": "user", "content": "查询报告"},
+                {"id": f"{message_id}:answer", "role": "assistant", "content": "已有报告。", "sources": sources,
+                 "completedAt": int(finished.timestamp() * 1000), "completedRunId": str(run_id), "elapsedMs": 1520,
+                 "activity": [{"type": "tool_end", "tools": ["web_search"], "web_result_count": 1},
+                              {"type": "evidence_review", "action": "search"},
+                              {"type": "web_queries", "queries": ["查询报告"]},
+                              {"type": "web_highlights", "pages": highlights},
+                              {"type": "web_pages_read", "pages": sources},
+                              {"type": "timing", "operation": "answer_generation", "elapsed_ms": 2340}]},
             ])
             store.recent_sessions.assert_awaited_once_with("owner")
 

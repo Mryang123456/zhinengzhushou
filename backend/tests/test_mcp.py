@@ -42,10 +42,13 @@ class McpTests(unittest.TestCase):
         governance = load_governance(MCP_CONFIG_FILE)
         schema = search_tool_with_policy_schema(tool, governance).args_schema
         self.assertEqual(set(schema["properties"]), {"query", "region", "timelimit", "max_results"})
-        self.assertEqual(schema["properties"]["max_results"]["maximum"], 8)
+        self.assertNotIn("maximum", schema["properties"]["max_results"])
         arguments = {"query": "近期新闻", "region": "cn-zh", "timelimit": "w"}
-        self.assertEqual(validate_tool_arguments(tool.name, arguments, governance), {**arguments, "max_results": 5})
-        for bad_args in ({"region": "invalid"}, {"timelimit": "invalid"}, {"max_results": 10}, {"backend": "auto"}):
+        self.assertEqual(validate_tool_arguments(tool.name, arguments, governance), arguments)
+        self.assertEqual(
+            validate_tool_arguments(tool.name, arguments | {"max_results": 100}, governance)["max_results"], 100,
+        )
+        for bad_args in ({"region": "invalid"}, {"timelimit": "invalid"}, {"max_results": 0}, {"backend": "auto"}):
             with self.subTest(bad_args=bad_args), self.assertRaises(ToolPolicyError):
                 validate_tool_arguments(tool.name, arguments | bad_args, governance)
 

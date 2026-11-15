@@ -1,14 +1,13 @@
 """验证每个景点的必需条件，并仅输出有对应证据的候选。"""
 
 import asyncio
-import json
 import os
 import re
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.app.content_safety import contains_secret, is_direct_prompt_override, sanitize_untrusted_text
+from backend.app.content_safety import contains_secret, is_direct_prompt_override
+from backend.app.quality.web_fetch import fetch_page_text
 
 
 class Candidate(BaseModel):
@@ -32,25 +31,8 @@ def recommendation_constraints(request: str) -> tuple[bool, bool]:
     return bool(INDOOR.search(request)), bool(re.search(r"孩子|小孩|儿童|小朋友|亲子", request))
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
 def _fetch_excerpt(url: str, key: str, location: str) -> str:
-    request = Request(
-        "https://api.deepseek.com/v1/tools/fetch",
-        data=json.dumps({"url": url}).encode(),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    )
-    try:
-        with build_opener(_NoRedirect()).open(request, timeout=4) as response:
-            body = json.loads(response.read(256_000)).get("content", "")
-    except (OSError, ValueError, AttributeError):
-        return ""
-    if not isinstance(body, str):
-        return ""
-    chunks = re.split(r"[\n。！？]+", sanitize_untrusted_text(body, 60_000))
+    chunks = re.split(r"[\n。！？]+", fetch_page_text(url, key))
     relevant = [chunk for chunk in chunks if INDOOR.search(chunk) or FAMILY.search(chunk) or (location and location in chunk)]
     return "。".join(" ".join(chunk.split()) for chunk in relevant[:16])[:1800]
 

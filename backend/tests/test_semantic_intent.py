@@ -4,19 +4,22 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.tools import tool
 
 from backend.app.agent.service import build_agent
 from backend.app.agent.turns import stream_events
+from backend.app.config import MCP_CONFIG_FILE
+from backend.app.mcp.governance import load_governance
 from backend.app.intent.capabilities import describe_capabilities
+from backend.app.intent.followup import resolve_weather_followup
 from backend.app.intent.policy import classify
 
 
 class Model:
     def __init__(self):
-        self.revision_question = ""
         self.router_inputs = []
 
     async def ainvoke(self, messages):
@@ -37,16 +40,116 @@ class Model:
 
     async def astream(self, messages):
         latest = messages[-1]
-        if "上一版校验原因" in latest.content:
-            self.revision_question = latest.content
+        if isinstance(latest, ToolMessage):
             yield AIMessageChunk(content="报告披露营收为 20 亿元。[S1]")
-        elif isinstance(latest, ToolMessage):
-            yield AIMessageChunk(content="草稿没有引用。")
         else:
             yield AIMessageChunk(content="我们来聊星河科技。")
 
 
 class SemanticIntentTests(unittest.TestCase):
+    def test_general_tool_request_discovers_registered_mcp_and_keeps_approval(self):
+        @tool
+        async def calendar_list() -> str:
+            """列出日历里的安排。"""
+            return "日历安排。"
+
+        @tool
+        async def calendar_unknown() -> str:
+            """列出未注册的日历。"""
+            return "未授权。"
+
+        question = "帮我列出下周日历里的安排"
+        governance = load_governance(MCP_CONFIG_FILE)
+        governance["toolPolicies"]["calendar_list"] = {"arguments": {}}
+
+        class CalendarModel(Model):
+            async def ainvoke(self, messages):
+                return AIMessage(content=json.dumps({"route": "tools", "question": question}))
+
+            def bind_tools(self, tools):
+                names = {item.name for item in tools}
+                assert "calendar_list" in names and "calendar_unknown" not in names
+                return self
+
+            async def astream(self, messages):
+                if isinstance(messages[-1], ToolMessage):
+                    yield AIMessageChunk(content="等待确认。")
+                else:
+                    yield AIMessageChunk(content="", tool_calls=[
+                        {"name": "calendar_list", "id": "calendar", "args": {}},
+                    ])
+
+        async def collect():
+            graph = await build_agent(MCP_CONFIG_FILE, memory_db_path=None, initial_question=question)
+            return [event async for event in stream_events(graph, question, "calendar")]
+
+        discovery = AsyncMock(return_value=[calendar_list, calendar_unknown])
+        invoke = AsyncMock()
+        approval = SimpleNamespace(create=lambda *_: {"approval_id": "calendar-approval"})
+        with (
+            patch("langchain_mcp_adapters.client.MultiServerMCPClient.get_tools", discovery),
+            patch("backend.app.agent.service.load_governance", return_value=governance),
+            patch("backend.app.agent.service.create_approval_store", return_value=approval),
+            patch("backend.app.agent.service.create_chat_model", return_value=CalendarModel()),
+            patch("backend.app.agent.service.invoke_governed", invoke),
+            patch("backend.app.agent.service.audit"),
+        ):
+            events = asyncio.run(collect())
+        discovery.assert_awaited_once()
+        invoke.assert_not_awaited()
+        self.assertTrue(any(event["type"] == "approval_required" for event in events))
+
+    def test_weather_date_followup_retains_clothing_goal(self):
+        original = "上海现在适合穿什么衣服"
+        messages = [
+            HumanMessage(content=original),
+            AIMessage(content="", tool_calls=[{"name": "get_weather", "id": "weather", "args": {"location": "上海"}}]),
+            ToolMessage(content="上海当前天气：晴朗；气温 12°C。", tool_call_id="weather", name="get_weather"),
+            AIMessage(content="建议带外套。"),
+            HumanMessage(content="那后天呢？"),
+        ]
+        resolved = resolve_weather_followup("那后天呢？", messages, classify(original, []))
+        decision = classify(resolved, [])
+        self.assertTrue(decision["weather_clothing"])
+        self.assertFalse(decision["weather_activity"])
+
+    def test_semantic_tools_route_reaches_candidate_selection_without_skill_match(self):
+        class ToolsModel(Model):
+            async def ainvoke(self, messages):
+                question = json.loads(messages[-1].content)["当前请求"]
+                return AIMessage(content=json.dumps({"route": "tools", "question": question}))
+
+        async def collect():
+            graph = await build_agent(memory_db_path=None)
+            return [event async for event in stream_events(graph, "把八个三加在一起", "semantic-tools")]
+
+        with patch("backend.app.agent.service.create_chat_model", return_value=ToolsModel()):
+            events = asyncio.run(collect())
+        self.assertTrue(any(event["type"] == "tool_candidates" and "calculator" in event["tools"] for event in events))
+
+    def test_no_public_search_does_not_disable_calculator(self):
+        class MathModel(Model):
+            def bind_tools(self, tools):
+                assert "calculator" in {tool.name for tool in tools}
+                assert "web_search" not in {tool.name for tool in tools}
+                return self
+
+            async def astream(self, messages):
+                if isinstance(messages[-1], ToolMessage):
+                    yield AIMessageChunk(content="42")
+                else:
+                    yield AIMessageChunk(content="", tool_calls=[
+                        {"name": "calculator", "id": "math", "args": {"expression": "6*7"}},
+                    ])
+
+        async def collect():
+            graph = await build_agent(memory_db_path=None)
+            return [event async for event in stream_events(graph, "不要联网，算一下 6*7", "local-math")]
+
+        with patch("backend.app.agent.service.create_chat_model", return_value=MathModel()):
+            events = asyncio.run(collect())
+        self.assertEqual(events[-1]["content"], "42")
+
     def test_weather_clothing_uses_weather_tool_even_if_model_selects_public_search(self):
         question = "上海现在适合穿什么衣服"
         report = "上海当前天气：晴朗；气温 12°C，体感 10°C。"
@@ -91,7 +194,7 @@ class SemanticIntentTests(unittest.TestCase):
         self.assertIn("挡风外套", events[-1]["content"])
         self.assertTrue(events[-1]["content"].endswith(report))
 
-    def test_rewrite_reaches_search_and_revision_and_does_not_cross_threads(self):
+    def test_rewrite_reaches_search_and_does_not_cross_threads(self):
         model = Model()
 
         async def collect():
@@ -111,8 +214,7 @@ class SemanticIntentTests(unittest.TestCase):
                 {"href": "https://example.com/report", "body": "报告披露营收为 20 亿元。"},
             ]
             resolved, missing = asyncio.run(collect())
-            ddgs.return_value.text.assert_called_once_with("星河科技 官方财报", max_results=5)
-        self.assertIn("查询星河科技最近财报数字", model.revision_question)
+            ddgs.return_value.text.assert_called_once_with("星河科技 官方财报", max_results=50)
         self.assertIn("20 亿元", resolved[-1]["content"])
         capabilities = model.router_inputs[1]["后端能力"]
         self.assertTrue(capabilities["public_search"])

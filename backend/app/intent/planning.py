@@ -24,11 +24,13 @@ class IntentPlan(BaseModel):
     tasks: list[IntentTask] = Field(max_length=3)
 
 
-COMPOUND_MARKER = re.compile(r"如果|要是|若[^干]|的话|就推荐|再(?:查|搜|推荐|看看)|并且|同时|以及|然后")
+COMPOUND_MARKER = re.compile(r"如果|要是|若[^干]|的话|就推荐|再(?:查|搜|推荐|看看)|并且|同时|以及|然后|顺便|另外|也(?:查|搜|看看)")
 RAIN_CONDITION = re.compile(r"(?:如果|要是|若)(?:会)?下雨|下雨(?:的?话|就)")
 EXTERNAL_ACTION = re.compile(r"查|搜|推荐|找|预报")
 CONDITIONAL_MARKER = re.compile(r"如果|要是|若[^干]|的话|才(?:查|搜|推荐)|否则|不然")
 NEGATED_ACTION = re.compile(r"(?:不要|不用|无需|禁止|别|不)\s*(?:再|去|联网|上网)?\s*(?:查|搜|推荐|找)|(?:不|没)下雨|下雨.*(?:不|别)(?:查|搜|推荐|找)")
+WEATHER_REQUEST = re.compile(r"天气|气温|预报")
+WEATHER_DATE = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}[日号]|(?:星期|周)[一二三四五六日天]|今天|明天|明日|后天")
 
 
 def planning_candidate(question: str) -> bool:
@@ -36,6 +38,12 @@ def planning_candidate(question: str) -> bool:
         len(question) <= 1000
         and bool(COMPOUND_MARKER.search(question) and EXTERNAL_ACTION.search(question))
         and (bool(re.search(r"天气|下雨|气温|降雨", question)) or len(EXTERNAL_ACTION.findall(question)) >= 2)
+    )
+
+
+def explicit_weather_plan(question: str) -> bool:
+    return planning_candidate(question) and (
+        bool(RAIN_CONDITION.search(question)) or len(WEATHER_REQUEST.findall(question)) >= 2
     )
 
 
@@ -51,15 +59,21 @@ def validate_plan(plan: IntentPlan, question: str) -> list[dict]:
         return []
     if rain_requested != any(task.condition == "if_rain" for task in tasks):
         return []
+    cursor = 0
     for index, task in enumerate(tasks):
-        if task.text not in question or any(entity and entity not in question for entity in (task.location, task.date)):
+        start = question.find(task.text, cursor)
+        if start < 0 or any(entity and entity not in question for entity in (task.location, task.date)):
             return []
+        cursor = start + len(task.text)
         if task.depends_on is not None and task.depends_on >= index:
             return []
         if task.kind == "weather":
             if not task.location or task.condition != "always" or task.depends_on is not None:
                 return []
             if not re.search(r"天气|气温|下雨|降雨|预报", task.text):
+                return []
+            dates = set(WEATHER_DATE.findall(task.text))
+            if task.location not in task.text or (task.date and task.date not in task.text) or dates - {task.date}:
                 return []
         elif rain_requested and task.condition != "if_rain":
             return []

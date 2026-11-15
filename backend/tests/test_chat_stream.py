@@ -7,7 +7,7 @@ import json
 import os
 import unittest
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from backend.app.agent.service import build_agent
 from backend.app.agent.turns import stream_events
@@ -43,6 +43,31 @@ class ChatStreamTests(unittest.TestCase):
         self.assertEqual(events[1]["content"], "已核验答案")
         self.assertEqual(events[-1]["content"], "已核验答案")
 
+    def test_search_progress_counts_unique_links_from_successful_results_only(self):
+        class FakeGraph:
+            async def astream(self, *_args, **_kwargs):
+                yield "updates", {"tools": {"messages": [
+                    ToolMessage(name="web_search", tool_call_id="1", content='[{"url":"https://example.org/a"}]'),
+                    ToolMessage(name="search_search_news", tool_call_id="2", content='{"href":"https://example.org/a"}\n{"url":"https://example.org/b"}'),
+                    ToolMessage(name="search_search_text", tool_call_id="3", status="error", content='[{"url":"https://example.org/c"}]'),
+                ]}}
+                yield "updates", {"tools": {"messages": [
+                    ToolMessage(name="web_search", tool_call_id="4", content="[]", artifact={"read_pages": [
+                        {"url": "https://example.org/a", "title": "已读页面", "domain": "example.org"},
+                    ]}),
+                ]}}
+                yield "custom", {"type": "token", "content": "[来源 1](https://example.org/a) [其他](https://example.org/c)"}
+
+        async def collect():
+            return [event async for event in stream_events(FakeGraph(), "测试", "search-progress")]
+
+        events = asyncio.run(collect())
+        self.assertEqual([event["web_result_count"] for event in events if event["type"] == "tool_end"], [2, 0])
+        self.assertEqual([event["pages"] for event in events if event["type"] == "web_pages_read"], [
+            [{"url": "https://example.org/a", "title": "已读页面", "domain": "example.org"}],
+        ])
+        self.assertEqual(events[-1]["sources"], [{"url": "https://example.org/a", "title": "example.org", "domain": "example.org"}])
+
     def test_real_graph_stream_finishes_when_nodes_return_no_update(self):
         class FakeModel:
             def bind_tools(self, _tools):
@@ -62,6 +87,11 @@ class ChatStreamTests(unittest.TestCase):
         ):
             events = asyncio.run(collect())
 
+        self.assertTrue(any(
+            event.get("type") == "timing" and event.get("operation") == "answer_generation"
+            and isinstance(event.get("elapsed_ms"), int)
+            for event in events
+        ))
         self.assertEqual(events[-1], {"type": "done", "content": "计算结果是 40。"})
         self.assertEqual([event["content"] for event in events if event["type"] == "token"], ["计算结果是 40。"])
 
@@ -108,6 +138,7 @@ class ChatStreamTests(unittest.TestCase):
                 chunks = [frame["content"] for frame in frames if frame["type"] == "token"]
                 self.assertGreater(len(chunks), 1)
                 self.assertEqual("".join(chunks), answer)
+                self.assertGreaterEqual(frames[-1].pop("elapsed_ms"), 0)
                 self.assertEqual(frames[-1], {"type": "done", "content": answer})
                 if expects_mcp:
                     discovery.assert_awaited_once()

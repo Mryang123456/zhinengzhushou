@@ -10,7 +10,10 @@ from langchain_core.messages import AIMessageChunk
 
 from backend.app.agent.service import build_agent
 from backend.app.agent.turns import stream_events
+from backend.app.intent.policy import classify
 from backend.app.intent.planning import IntentPlan, validate_plan
+from backend.app.skills.registry import load_skills
+from backend.app.config import SKILLS_DIR
 
 
 QUESTION = "查明天杭州天气，下雨的话推荐两个室内景点"
@@ -21,6 +24,20 @@ TASKS = [
 
 
 class IntentPlanningTests(unittest.TestCase):
+    def test_open_ended_local_food_recommendations_require_public_sources(self):
+        skills = load_skills(SKILLS_DIR)
+
+        for question in ("查询 北京有什么美食", "推荐成都值得吃的小吃", "上海有哪些特色菜"):
+            with self.subTest(question=question):
+                decision = classify(question, skills)
+                self.assertTrue(decision["requires_web_evidence"])
+                self.assertTrue(decision["local_food_discovery"])
+                self.assertEqual(decision["web_query"], question)
+
+        for question in ("把这段美食介绍润色一下", "介绍一下北京烤鸭的历史"):
+            with self.subTest(question=question):
+                self.assertFalse(classify(question, skills).get("local_food_discovery", False))
+
     def test_weather_followups_keep_context_and_recommend_only_supported_places(self):
         third = "如果下雨，推荐两个适合带孩子的室内景点"
         chapter = "杭州甲馆是适合亲子的室内景点。"
@@ -91,6 +108,15 @@ class IntentPlanningTests(unittest.TestCase):
                 plan = IntentPlan.model_validate({"tasks": [TASKS[0], TASKS[1] | changes]})
                 self.assertEqual(validate_plan(plan, QUESTION), [])
 
+    def test_each_weather_task_must_keep_its_own_city_and_date(self):
+        question = "查明天上海天气，同时查后天广州气温"
+        first = {"kind": "weather", "text": "查明天上海天气", "location": "上海", "date": "明天"}
+        second = {"kind": "weather", "text": "查后天广州气温", "location": "广州", "date": "后天"}
+        for tasks in ([first | {"location": "广州"}, second], [first | {"date": "后天"}, second],
+                      [first | {"date": ""}, second], [second, first]):
+            with self.subTest(tasks=tasks):
+                self.assertEqual(validate_plan(IntentPlan.model_validate({"tasks": tasks}), question), [])
+
     def test_graph_runs_search_only_when_matching_forecast_indicates_rain(self):
         class Model:
             async def astream(self, messages):
@@ -123,6 +149,6 @@ class IntentPlanningTests(unittest.TestCase):
                 events = asyncio.run(collect())
                 self.assertIn(expected, events[-1]["content"])
                 if expected == "甲博物馆":
-                    search.return_value.text.assert_called_once_with("杭州 室内景点", max_results=5)
+                    search.return_value.text.assert_called_once_with("杭州 室内景点", max_results=50)
                 else:
                     search.assert_not_called()

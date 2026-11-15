@@ -149,8 +149,12 @@ class TurnsTests(unittest.TestCase):
             client = TestClient(server.app)
             self.assertEqual(post(client)[-1]["type"], "done")
             self.assertEqual(post(client)[-1]["type"], "error")
-            self.assertEqual(post(client, retry=True)[-1], {"type": "done", "content": "第 2 次回答"})
-            self.assertEqual(post(client, retry=True)[-1], {"type": "done", "content": "第 3 次回答"})
+            terminal = post(client, retry=True)[-1]
+            self.assertGreaterEqual(terminal.pop("elapsed_ms"), 0)
+            self.assertEqual(terminal, {"type": "done", "content": "第 2 次回答"})
+            terminal = post(client, retry=True)[-1]
+            self.assertGreaterEqual(terminal.pop("elapsed_ms"), 0)
+            self.assertEqual(terminal, {"type": "done", "content": "第 3 次回答"})
             self.assertEqual(post(client, next_id)[-1]["type"], "done")
             self.assertEqual(post(client, retry=True)[-1]["retryable"], False)
 
@@ -240,7 +244,10 @@ class TurnsTests(unittest.TestCase):
                 response = client.post("/chat/stream", json={**payload, "retry": retry})
                 self.assertEqual(response.status_code, 200)
                 frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
-                self.assertEqual(frames[-1], {"type": "done", "content": expected})
+                self.assertEqual(frames[-1]["type"], "done")
+                self.assertEqual(frames[-1]["content"], expected)
+                self.assertEqual([source["url"] for source in frames[-1].get("sources", [])],
+                                 ["https://example.com/report"] if retry else [])
                 self.assertFalse(any(frame["type"] == "approval_required" for frame in frames))
 
         self.assertEqual(discovery.await_count, 2)

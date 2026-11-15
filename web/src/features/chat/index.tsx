@@ -64,12 +64,19 @@ function AccountChat({ storageKey, userId, accessToken, apiKey, setApiKey, login
   const connection = useConnectionStatus(API_URL, apiKey, accessToken);
   const chat = useChatSessions(storageKey, savedSessions);
   const { syncSessions } = chat;
+  const { activeSession } = chat;
+  const messages = useChatMessages({
+    apiUrl: API_URL, apiKey, accessToken, activeSession,
+    updateMessages: chat.updateMessages,
+    refreshConnection: connection.refresh,
+  });
+  const { isRunning } = messages;
   useEffect(() => {
     if (!accessToken) return;
     const controller = new AbortController();
     const sync = () => {
       void loadRemoteSessions(API_URL, apiKey, accessToken, controller.signal)
-        .then((sessions) => { if (!controller.signal.aborted) syncSessions(sessions); })
+        .then((sessions) => { if (!controller.signal.aborted) syncSessions(sessions, isRunning); })
         .catch(() => { /* 本地记录仍可用，下一次窗口聚焦重试。 */ });
     };
     sync();
@@ -78,13 +85,7 @@ function AccountChat({ storageKey, userId, accessToken, apiKey, setApiKey, login
       controller.abort();
       window.removeEventListener("focus", sync);
     };
-  }, [accessToken, apiKey, syncSessions]);
-  const { activeSession } = chat;
-  const messages = useChatMessages({
-    apiUrl: API_URL, apiKey, accessToken, activeSession,
-    updateMessages: chat.updateMessages,
-    refreshConnection: connection.refresh,
-  });
+  }, [accessToken, apiKey, syncSessions, isRunning]);
 
   const closeMobileSidebar = () => {
     if (window.innerWidth <= 760) setSidebarOpen(false);
@@ -120,6 +121,9 @@ function AccountChat({ storageKey, userId, accessToken, apiKey, setApiKey, login
         onConfirmApproval={messages.confirmApproval}
         retryMessageId={messages.retryMessageId}
         onRetry={messages.retryLastReply}
+        regenerateMessageId={messages.regenerateMessageId}
+        onRegenerate={messages.regenerateLastReply}
+        onEditQuestion={!messages.isSending && !chat.draft.trim() ? chat.setDraft : undefined}
       />
       <Composer
         key={activeSession.id}

@@ -31,6 +31,8 @@ jobs:
         env:
           TEST_CHECKPOINT_DATABASE_URL: postgresql://agent_test:agent_test@127.0.0.1:5432/agent_test
       - run: python -m backend.evals.rag backend/evals/rag_regression.jsonl --mode fixture -k 1 --min-recall 1 --min-no-evidence-accuracy 1
+      - run: python -m backend.evals.intent backend/evals/intent_regression.jsonl
+      - run: python -m backend.evals.intent backend/evals/planning_regression.jsonl
       - run: python -m py_compile backend/app/api/server.py backend/app/agent/service.py
   frontend:
     runs-on: ubuntu-latest

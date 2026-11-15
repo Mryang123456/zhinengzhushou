@@ -57,4 +57,8 @@ def resolve_weather_followup(question: str, messages: list, previous_intent: dic
         return f"查{previous_date}{location}天气，{question}"
     else:
         return question
-    return prefix + ("适合出游吗" if previous_intent.get("weather_assessment") else "怎么样")
+    if not previous_intent.get("weather_assessment"):
+        return prefix + "怎么样"
+    if previous_intent.get("weather_clothing"):
+        return prefix + ("适合出游吗，怎么穿" if previous_intent.get("weather_activity") else "怎么穿")
+    return prefix + "适合出游吗"

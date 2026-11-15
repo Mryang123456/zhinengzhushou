@@ -9,6 +9,8 @@
   flex: 1;
   min-width: 0;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable both-edges;
   overscroll-behavior-y: contain;
 }
 
@@ -25,39 +27,22 @@
   overflow-wrap: anywhere;
 }
 
-.chat-messages-progress,
-.chat-messages-steps,
 .chat-messages-notice {
   margin-bottom: 8px;
   font-size: 13px;
   color: #536581;
-}
-
-.chat-messages-steps summary {
-  width: fit-content;
-  cursor: pointer;
-}
-
-.chat-messages-steps ol {
-  margin: 6px 0 12px;
-  padding-left: 22px;
-  line-height: 1.65;
-  overflow-wrap: anywhere;
-}
-
-.chat-messages-notice {
   margin-top: 8px;
   color: #854014;
 }
 
 .chat-messages-conversation {
-  width: min(900px, calc(100% - 56px));
+  width: var(--chat-column-width);
   margin: 0 auto;
   flex: 1;
-  padding: 38px 0 26px;
+  padding: 20px 0 10px;
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 16px;
 }
 
 .chat-messages-message {
@@ -65,32 +50,34 @@
   gap: 13px;
 }
 
-.chat-messages-avatar {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 36px;
-  display: grid;
-  place-items: center;
-  color: #41506a;
-  background: #edf1f7;
-  border-radius: 11px;
+.chat-messages-assistant {
+  gap: 0;
 }
 
-.chat-messages-assistant .chat-messages-avatar {
-  color: #fff;
-  background: #17274c;
+.chat-messages-assistant .chat-messages-message-body {
+  width: calc(100% - 64px);
+  max-width: calc(100% - 64px);
+  margin-inline: 32px;
+}
+
+.chat-messages-assistant :is(.chat-messages-bubble, .chat-messages-bubble-body) {
+  width: 100%;
+  min-width: 0;
+}
+
+.chat-messages-assistant .chat-messages-bubble-content {
+  padding-inline: 0;
+}
+
+.chat-messages-user .chat-messages-bubble-content {
+  background: #eaf0fb;
+  border-radius: 25px;
+  font-size: 15px;
 }
 
 .chat-messages-message-body {
   min-width: 0;
   max-width: calc(100% - 49px);
-}
-
-.chat-messages-message-name {
-  margin: 2px 0 8px;
-  font-size: 14px;
-  color: #3e4b63;
-  font-weight: 700;
 }
 
 .chat-messages-cursor {
@@ -103,8 +90,13 @@
   animation: chat-messages-blink 1s steps(2) infinite;
 }
 
-.chat-messages-copy {
-  margin-top: 10px;
+.chat-messages-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 14px;
+}
+
+.chat-messages-action {
   border: 0;
   padding: 4px 0;
   background: transparent;
@@ -113,6 +105,7 @@
   align-items: center;
   gap: 5px;
   font-size: 12px;
+  cursor: pointer;
 }
 
 @keyframes chat-messages-blink {
@@ -123,16 +116,12 @@
 
 @media (max-width: 760px) {
   .chat-messages-conversation {
-    width: calc(100% - 28px);
-  }
-
-  .chat-messages-conversation {
-    padding-top: 25px;
-    gap: 22px;
+    padding-top: 14px;
+    gap: 12px;
   }
 
   .chat-messages-message-body {
-    max-width: calc(100% - 49px);
+    max-width: 100%;
   }
 }
 

@@ -1,4 +1,5 @@
 import type { Message, Session } from "../types";
+import { mergeMessageOrder } from "../utils/messageOrder";
 import { accessSessionSnapshot } from "./sessionDatabase";
 
 const LIMIT = 40;
@@ -62,12 +63,17 @@ function mergeSession(stored: Session, previous: Session | undefined, current: S
   for (const message of current.messages) {
     if (priorMessages.get(message.id) !== message) messages.set(message.id, message);
   }
+  const storedOrder = stored.messages.map((message) => messages.get(message.id) ?? message);
+  const currentOrder = current.messages.flatMap((message) => {
+    const latest = messages.get(message.id);
+    return latest ? [latest] : [];
+  });
   return {
     ...stored,
     title: previous?.title !== current.title ? current.title : stored.title,
     archived: previous?.archived !== current.archived ? current.archived : stored.archived,
     updatedAt: Math.max(stored.updatedAt, current.updatedAt),
-    messages: [...messages.values()],
+    messages: mergeMessageOrder(storedOrder, currentOrder),
   };
 }
 

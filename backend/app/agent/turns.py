@@ -2,8 +2,17 @@
 
 from contextlib import aclosing, asynccontextmanager
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
+
+from backend.app.quality.web_activity import search_highlights
+from backend.app.quality.validator import cited_web_sources, web_result_urls
+
+
+def _done_event(answer: str, messages: list[BaseMessage]) -> dict:
+    turn_start = next((i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)), 0)
+    sources = cited_web_sources(answer, messages[turn_start:])
+    return {"type": "done", "content": answer, **({"sources": sources} if sources else {})}
 
 
 @asynccontextmanager
@@ -55,21 +64,25 @@ async def stream_events(
     stable_id = f"web:{message_id}" if message_id is not None else None
     question_message = HumanMessage(content=question, id=stable_id)
     messages: list[BaseMessage] = [question_message]
+    seen_web_urls: set[str] = set()
     input_state: dict | None = {"messages": messages, "retry": retry, "durable_run_id": run_id}
     if stable_id is not None:
         snapshot = await app.aget_state(config)
         history = snapshot.values.get("messages", [])
         if run_id and snapshot.values.get("durable_run_id") == run_id:
             if snapshot.values.get("finished_run_id") == run_id and history and isinstance(history[-1], AIMessage):
-                yield {"type": "done", "content": history[-1].content}
+                yield _done_event(history[-1].content, history)
                 return
             input_state = None
+            start = next((i for i in range(len(history) - 1, -1, -1) if isinstance(history[i], HumanMessage)), 0)
+            seen_web_urls = web_result_urls(history[start:]) or set()
         else:
             rejection = _prepare_retry(history, messages, stable_id, question, retry)
             if rejection:
                 yield rejection
                 return
     final_answer = ""
+    returned_tools = []
     options = {"durability": "sync"} if run_id else {}
     async with aclosing(app.astream(
         input_state,
@@ -85,14 +98,36 @@ async def stream_events(
                 continue
             tool_update = payload.get("tools")
             if isinstance(tool_update, dict):
-                tool_names = [getattr(message, "name", "工具") for message in tool_update.get("messages", [])]
-                yield {"type": "tool_end", "tools": tool_names}
+                tool_messages = tool_update.get("messages", [])
+                returned_tools.extend(message for message in tool_messages if isinstance(message, ToolMessage))
+                tool_names = [getattr(message, "name", "工具") for message in tool_messages]
+                frame = {"type": "tool_end", "tools": tool_names}
+                urls = web_result_urls(tool_messages)
+                new_urls = set()
+                if urls is not None:
+                    new_urls = urls - seen_web_urls
+                    frame["web_result_count"] = len(new_urls)
+                    seen_web_urls.update(urls)
+                yield frame
+                pages = {
+                    page["url"]: page for message in tool_messages
+                    if isinstance(message, ToolMessage) and message.status == "success" and isinstance(message.artifact, dict)
+                    for page in message.artifact.get("read_pages", [])
+                }
+                if pages:
+                    yield {"type": "web_pages_read", "pages": list(pages.values())}
+                if new_urls:
+                    highlights = search_highlights(question, tool_messages, new_urls)
+                    if highlights:
+                        yield {"type": "web_highlights", "pages": highlights}
     if run_id:
         snapshot = await app.aget_state(config)
         if snapshot.values.get("finished_run_id") != run_id:
             raise RuntimeError("任务缺少已完成的工作流检查点。")
-        final_answer = snapshot.values["messages"][-1].content
-    yield {"type": "done", "content": final_answer}
+        history = snapshot.values["messages"]
+        yield _done_event(history[-1].content, history)
+    else:
+        yield _done_event(final_answer, returned_tools)
 
 
 def _prepare_retry(history, messages, stable_id, question, retry):

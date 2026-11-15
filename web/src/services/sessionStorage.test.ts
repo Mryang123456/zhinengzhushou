@@ -104,3 +104,17 @@ it("刷新后保留持久化审批的待确认状态，但不保存令牌", asyn
   });
   expect((await loadSessions("approval-key"))?.[0].messages[0].approval?.status).toBe("pending");
 });
+
+it("刷新后保留补回的中间问答，也保留另一页新增的消息", async () => {
+  vi.stubGlobal("localStorage", { getItem: () => null });
+  const key = "ordered-session";
+  const pair = (id: string): Session["messages"] => [
+    { id, role: "user", content: id },
+    { id: id + ":answer", role: "assistant", content: id },
+  ];
+  const previous: Session = { id: "thread", title: "会话", updatedAt: 1, messages: [...pair("a"), ...pair("c")] };
+  await saveSessions(key, [{ ...previous, messages: [...previous.messages, ...pair("d")] }]);
+  await saveSessions(key, [{ ...previous, messages: [...pair("a"), ...pair("b"), ...pair("c")] }], [previous]);
+  const restored = (await loadSessions(key))![0];
+  expect(restored.messages.filter((message) => message.role === "user").map((message) => message.id)).toEqual(["a", "b", "c", "d"]);
+});

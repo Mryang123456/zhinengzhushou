@@ -1,0 +1,129 @@
+.chat-activity,
+.chat-activity-status {
+  margin-bottom: 7px;
+  color: #626975;
+  font-size: clamp(13px, 1.25vw, 15px);
+}
+
+.chat-activity-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  min-height: 32px;
+  padding: 3px 0;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.chat-activity-summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-activity-summary:hover {
+  background: #edf1f7;
+}
+
+.chat-activity-summary svg {
+  flex: none;
+}
+
+.chat-activity-summary svg:first-child {
+  color: #4568ff;
+}
+
+.chat-activity[open] .chat-activity-chevron {
+  transform: rotate(180deg);
+}
+
+.chat-activity-steps {
+  margin: 9px 0 12px 8px;
+  padding: 1px 0 1px 16px;
+  border-left: 1px solid #d7deea;
+  list-style: none;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.chat-activity-steps > li {
+  position: relative;
+  padding: 5px 0;
+}
+
+.chat-activity-steps > li::before {
+  position: absolute;
+  top: 12px;
+  left: -20px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #8a909b;
+  content: "";
+}
+
+.chat-activity-pages {
+  list-style: none;
+  margin: 3px 0 0;
+  padding: 0;
+}
+
+.chat-activity-pages a {
+  color: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.chat-activity-pages svg {
+  vertical-align: -1px;
+}
+
+.chat-activity-detail-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-activity-queries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0;
+  margin: 4px 0;
+  list-style: none;
+}
+
+.chat-activity-queries li {
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: #edf1f7;
+}
+
+.chat-activity-pages p {
+  margin: 0 0 5px;
+  color: #536581;
+  font-weight: normal;
+}
+
+.chat-activity-timings {
+  margin: 0 0 8px 30px;
+}
+
+.chat-activity-timings summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.chat-activity-timings ul {
+  padding-left: 18px;
+  margin: 4px 0;
+}
+
+.chat-activity-steps li[aria-current="step"] {
+  color: #304d80;
+  font-weight: 600;
+}
+
+.chat-activity-steps li[aria-current="step"]::before {
+  background: #315dbe;
+}

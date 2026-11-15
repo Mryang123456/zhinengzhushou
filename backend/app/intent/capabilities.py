@@ -3,6 +3,7 @@
 from collections.abc import Mapping, Set
 
 from backend.app.content_safety import sanitize_untrusted_text
+from backend.app.intent.semantic import is_public_search_tool
 from backend.app.mcp.governance import RISK_ORDER, risk_for_tool
 
 
@@ -22,8 +23,7 @@ def describe_capabilities(
     available = {}
     if batch_limit > 0:
         for name, tool in tools.items():
-            public_search = name == "web_search" or (name.startswith("search_") and name != "search_knowledge_base")
-            if name in blocked_tools or (public_search and not public_search_allowed):
+            if name in blocked_tools or (is_public_search_tool(name) and not public_search_allowed):
                 continue
             if name in mcp_names:
                 requires_approval = RISK_ORDER.get(risk_for_tool(name, governance), 4) >= RISK_ORDER["L2"]

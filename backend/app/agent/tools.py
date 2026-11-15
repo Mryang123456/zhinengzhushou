@@ -4,6 +4,7 @@ import ast
 import json
 import math
 import operator
+import time
 from urllib.request import Request, urlopen
 
 from ddgs import DDGS
@@ -11,8 +12,10 @@ from langchain_core.tools import ToolException, tool
 
 from backend.app.knowledge.store import KnowledgeStore, pack_evidence
 from backend.app.memory.store import MemoryStore
+from backend.app.observability import observe_duration
 from backend.app.skills.registry import Skill
 from backend.app.weather.service import WeatherQueryError, query_weather, weather_code_description
+from backend.app.quality.web_result_budget import WEB_RESULT_LIMIT
 
 
 _BINARY_OPERATORS = {
@@ -78,19 +81,21 @@ def get_weather(location: str, date: str = "current", days: int = 1) -> str:
 
 
 @tool
-def web_search(query: str, max_results: int = 5) -> str:
+def web_search(query: str) -> str:
     """检索公开网页中的最新信息，返回标题、摘要和链接。"""
+    started = time.monotonic()
     try:
-        limit = max(1, min(max_results, 8))
-        results = list(DDGS().text(query, max_results=limit))
+        results = list(DDGS().text(query, max_results=WEB_RESULT_LIMIT))
     except Exception as error:
         raise ToolException("联网搜索失败，请稍后重试。") from error
+    finally:
+        observe_duration("web_search", time.monotonic() - started)
     results = [item for item in results if str(item.get("href", "")).startswith(("http://", "https://"))]
     if not results:
         raise ToolException("联网搜索没有返回可引用的结果。")
     return json.dumps([
         {"title": item.get("title", ""), "body": item.get("body", ""), "href": item["href"]}
-        for item in results
+        for item in results[:WEB_RESULT_LIMIT]
     ], ensure_ascii=False)
 
 
