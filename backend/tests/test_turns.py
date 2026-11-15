@@ -235,7 +235,7 @@ class TurnsTests(unittest.TestCase):
             patch.object(service, "create_memory_store", return_value=memory),
             patch.object(service, "create_approval_store", return_value=approval),
             patch.object(service, "load_governance", return_value=governance),
-            patch.object(service, "audit"),
+            patch("backend.app.agent.tool_execution.audit"),
             patch("backend.app.mcp.governance.audit"),
             patch("langchain_mcp_adapters.client.MultiServerMCPClient.get_tools", discovery),
         ):

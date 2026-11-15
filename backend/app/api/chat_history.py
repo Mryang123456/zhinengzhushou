@@ -2,10 +2,11 @@
 
 PUBLIC_ACTIVITY = {
     "progress": ("stage",),
+    "plan_progress": ("steps",),
     "tool_start": ("tools",),
     "tool_end": ("tools", "web_result_count"),
     "evidence_retry": (),
-    "evidence_review": ("action",),
+    "evidence_review": ("action", "stop_reason"),
     "quality": ("passed", "partial"),
     "web_pages_read": ("pages",),
     "web_queries": ("queries",),

@@ -10,8 +10,32 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.app.content_safety import contains_secret, is_direct_prompt_override, sanitize_untrusted_text
 from backend.app.intent.semantic import is_public_search_tool
 from backend.app.models.tool_protocol import contains_textual_tool_protocol
-from backend.app.quality.validator import web_answer_sources
+from backend.app.observability import event
+from backend.app.quality.validator import HIGH_RISK_TERMS, STRICT_WEB_TERMS, WEATHER_TERMS, web_answer_sources
 from backend.app.quality.web_writing import numbered_web_excerpts
+
+
+def evidence_retry_count(state: dict) -> int:
+    """旧检查点只保存了是否补查，新检查点保存次数。"""
+    return state.get("evidence_retries", int(state.get("evidence_retry_used", False)))
+
+
+def web_evidence_retry_limit(question: str) -> int:
+    return 1 if any(term in question for term in (*STRICT_WEB_TERMS, *WEATHER_TERMS, *HIGH_RISK_TERMS)) else 2
+
+
+def web_retry_made_progress(question: str, turn: list) -> bool:
+    """比较补查前后的可用摘录，兼容同一链接补回新正文。"""
+    last_call = next(
+        (index for index in range(len(turn) - 1, -1, -1)
+         if isinstance(turn[index], AIMessage) and turn[index].tool_calls),
+        len(turn),
+    )
+    before, after = (
+        {source["excerpt"] for source in web_answer_sources(question, messages) if source["kind"] != "仅标题"}
+        for messages in (turn[:last_call], turn)
+    )
+    return bool(after - before)
 
 
 def is_evidence_tool(name: str | None, *, knowledge: bool) -> bool:
@@ -85,7 +109,8 @@ def parse_evidence_decision(raw: str, messages: list) -> EvidenceDecision:
         missing = ""
     if decision.action == "search":
         query = validated_query(EvidenceRetry(query=decision.query).model_dump_json(), messages)
-        if not query or contains_textual_tool_protocol(query):
+        if not query:
+            event("evidence_query_rejected")
             return EvidenceDecision(action="partial", missing=missing)
         return EvidenceDecision(action="search", query=query, missing=missing)
     if decision.action == "clarify":
@@ -100,7 +125,10 @@ def parse_evidence_decision(raw: str, messages: list) -> EvidenceDecision:
     return decision.model_copy(update={"missing": missing})
 
 
-def retry_prompt(question: str, reason: str, messages: list, *, knowledge: bool, excerpt_limit: int = 400) -> str:
+def retry_prompt(
+    question: str, reason: str, messages: list, *, knowledge: bool, excerpt_limit: int = 400,
+    previous_gap: str = "",
+) -> str:
     attempts = [
         {"query": call["args"]["query"]}
         for message in messages if isinstance(message, AIMessage)
@@ -114,6 +142,7 @@ def retry_prompt(question: str, reason: str, messages: list, *, knowledge: bool,
     return json.dumps({
         "问题": question, "校验反馈": reason, "已尝试": attempts, "结果": results,
         "范围": "内部知识库" if knowledge else "公开网页",
+        **({"上轮待核实": previous_gap} if previous_gap else {}),
     }, ensure_ascii=False)
 
 

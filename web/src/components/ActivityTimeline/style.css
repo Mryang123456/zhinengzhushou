@@ -5,6 +5,24 @@
   font-size: clamp(13px, 1.25vw, 15px);
 }
 
+.chat-activity-plan {
+  margin: 4px 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-activity-plan li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  padding-block: 2px;
+  overflow-wrap: anywhere;
+}
+
+.chat-activity-plan-status { color: #626975; }
+.chat-activity-plan-status[data-status="complete"] { color: #17664d; }
+.chat-activity-plan-status:is([data-status="running"], [data-status="supplementing"]) { color: #304d80; }
+
 .chat-activity-summary {
   display: flex;
   align-items: center;

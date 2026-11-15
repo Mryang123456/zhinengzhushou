@@ -1,4 +1,15 @@
-import type { ActivityStep, Message, ProgressStage, StreamEvent } from "../../types";
+import type { ActivityStep, Message, PlanStep, ProgressStage, StreamEvent } from "../../types";
+
+export const planStatusLabels: Record<PlanStep["status"], string> = {
+  pending: "待处理",
+  running: "查询中",
+  reviewing: "资料已返回",
+  supplementing: "正在补查",
+  complete: "已完成",
+  partial: "部分完成",
+  skipped: "已跳过",
+  blocked: "暂无法完成",
+};
 
 const progressLabels: Record<ProgressStage, string> = {
   preparing: "已收到，正在准备",
@@ -76,6 +87,11 @@ function toolLabel(name: string) {
 }
 
 export function applyStreamEvent(message: Message, event: StreamEvent, replaceContent = false): Message {
+  if (event.type === "plan_progress" && Array.isArray(event.steps)) {
+    return { ...message, planSteps: event.steps.filter((step) =>
+      step && Number.isInteger(step.id) && typeof step.title === "string" && Object.hasOwn(planStatusLabels, step.status),
+    ) };
+  }
   if (event.type === "progress" && event.stage && Object.hasOwn(progressLabels, event.stage)) {
     const label = progressLabels[event.stage];
     return addStep(message, label);
@@ -99,6 +115,12 @@ export function applyStreamEvent(message: Message, event: StreamEvent, replaceCo
   }
   if (event.type === "evidence_retry") return addStep(message, "正在补查资料");
   if (event.type === "evidence_review") {
+    if (event.action === "partial" && event.stop_reason === "no_new_evidence") {
+      return addStep(message, "补查未找到新资料，整理已有结果");
+    }
+    if (event.action === "partial" && event.stop_reason === "budget_exhausted") {
+      return addStep(message, "已用完补查额度，整理已有结果");
+    }
     const labels = {
       answer: "已找到候选证据",
       search: "现有资料还缺少关键证据",

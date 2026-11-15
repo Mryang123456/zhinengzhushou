@@ -2,6 +2,28 @@ import { expect, test } from "vitest";
 import type { Message } from "../../types";
 import { applyStreamEvent, currentActivityStatus, summarizeActivity } from "./messageEvents";
 
+test("plan progress replaces the last snapshot during replay", () => {
+  const message: Message = { id: "answer", role: "assistant", content: "", pending: true };
+  const first = applyStreamEvent(message, { type: "plan_progress", steps: [
+    { id: 0, title: "查询天气", status: "running" },
+    { id: 1, title: "条件推荐", status: "pending" },
+  ] });
+  const second = applyStreamEvent(first, { type: "plan_progress", steps: [
+    { id: 0, title: "查询天气", status: "complete" },
+    { id: 1, title: "条件推荐", status: "skipped", reason: "预报未显示降雨" },
+  ] });
+  expect(second.planSteps?.map((step) => step.status)).toEqual(["complete", "skipped"]);
+  expect(second.planSteps?.[1].reason).toBe("预报未显示降雨");
+});
+
+test("shows why further searches stopped", () => {
+  const message: Message = { id: "answer", role: "assistant", content: "" };
+  const step = applyStreamEvent(message, {
+    type: "evidence_review", action: "partial", stop_reason: "no_new_evidence",
+  });
+  expect(step.toolEvents).toEqual(["补查未找到新资料，整理已有结果"]);
+});
+
 test("summarizes repeated searches and evidence checks without hiding the detailed events", () => {
   const message: Message = {
     id: "answer",

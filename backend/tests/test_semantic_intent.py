@@ -91,8 +91,8 @@ class SemanticIntentTests(unittest.TestCase):
             patch("backend.app.agent.service.load_governance", return_value=governance),
             patch("backend.app.agent.service.create_approval_store", return_value=approval),
             patch("backend.app.agent.service.create_chat_model", return_value=CalendarModel()),
-            patch("backend.app.agent.service.invoke_governed", invoke),
-            patch("backend.app.agent.service.audit"),
+            patch("backend.app.agent.tool_execution.invoke_governed", invoke),
+            patch("backend.app.agent.tool_execution.audit"),
         ):
             events = asyncio.run(collect())
         discovery.assert_awaited_once()

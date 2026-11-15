@@ -6,10 +6,11 @@ import json
 import unittest
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import MemorySaver
 
 from backend.app.agent.service import build_agent
-from backend.app.agent.turns import stream_events
+from backend.app.agent.turns import checkpoint_config, stream_events
 from backend.app.intent.policy import classify
 from backend.app.intent.planning import IntentPlan, validate_plan
 from backend.app.skills.registry import load_skills
@@ -152,3 +153,116 @@ class IntentPlanningTests(unittest.TestCase):
                     search.return_value.text.assert_called_once_with("杭州 室内景点", max_results=50)
                 else:
                     search.assert_not_called()
+                steps = [event["steps"] for event in events if event["type"] == "plan_progress"]
+                self.assertEqual([step["status"] for step in steps[0]], ["pending", "pending"])
+                self.assertEqual(steps[-1][1]["status"], {
+                    "甲博物馆": "partial", "没有执行条件推荐": "skipped", "暂时无法确认降雨条件": "blocked",
+                }[expected])
+
+    def test_durable_plan_resumes_after_weather_checkpoint_without_repeating_weather(self):
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        tasks = [task.model_dump() for task in IntentPlan.model_validate({"tasks": TASKS}).tasks]
+        line = "杭州的室内景点包括甲博物馆和乙展览馆。"
+
+        class Model:
+            async def astream(self, messages):
+                yield AIMessageChunk(content=json.dumps({"items": [
+                    {"name": "甲博物馆", "source": 1, "quote": line},
+                    {"name": "乙展览馆", "source": 1, "quote": line},
+                ]}, ensure_ascii=False))
+
+        async def collect():
+            saver = MemorySaver()
+            config = checkpoint_config("plan-thread")
+            initial_graph = await build_agent(memory_db_path=None, checkpointer=saver)
+            await initial_graph.aupdate_state(config, {
+                "messages": [
+                    HumanMessage(QUESTION, id="web:message-1"),
+                    AIMessage(content="", tool_calls=[{
+                        "name": "get_weather", "id": "fixture-0", "args": {"location": "杭州", "date": "明天"},
+                    }]),
+                    ToolMessage(
+                        content=f"杭州天气预报（{tomorrow}）：小雨；最高气温 20°C。",
+                        name="get_weather", tool_call_id="fixture-0",
+                    ),
+                ],
+                "tool_calls_used": 1, "durable_run_id": "run-1",
+                "intent": {"tasks": tasks, "plan_id": "fixture"},
+            }, as_node="tools")
+            resumed_graph = await build_agent(memory_db_path=None, checkpointer=saver, recovering=True)
+            return [event async for event in stream_events(
+                resumed_graph, QUESTION, "plan-thread", message_id="message-1", run_id="run-1",
+            )]
+
+        with (
+            patch.dict("os.environ", {"AGENT_DEEPSEEK_FETCH_ENABLED": ""}),
+            patch("backend.app.agent.service.create_chat_model", return_value=Model()),
+            patch("backend.app.agent.tools.query_weather") as weather,
+            patch("backend.app.agent.tools.DDGS") as search,
+        ):
+            search.return_value.text.return_value = [{"href": "https://example.org/trip", "body": line}]
+            events = asyncio.run(collect())
+        weather.assert_not_called()
+        search.return_value.text.assert_called_once()
+        self.assertEqual(events[0]["type"], "plan_progress")
+        self.assertEqual([step["status"] for step in events[0]["steps"]], ["complete", "pending"])
+        final_plan = [event for event in events if event["type"] == "plan_progress"][-1]
+        self.assertEqual([step["status"] for step in final_plan["steps"]], ["complete", "complete"])
+        self.assertIn("https://example.org/trip", events[-1]["content"])
+
+    def test_rain_plan_supplements_only_the_incomplete_search_and_combines_evidence(self):
+        first = "杭州的室内景点包括甲博物馆。"
+        second = "杭州的室内景点包括乙展览馆。"
+        first_url, second_url = "https://example.com/museum", "https://example.org/gallery"
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        test = self
+        reviewed = []
+
+        class Model:
+            async def ainvoke(self, messages):
+                data = json.loads(messages[-1].content)
+                test.assertEqual(data["问题"], "杭州 推荐两个室内景点")
+                test.assertEqual(data["已尝试"], [{"query": "杭州 室内景点"}])
+                test.assertNotIn("天气预报", messages[-1].content)
+                reviewed.append(data)
+                return AIMessage(content=json.dumps({
+                    "action": "search", "query": "室内展览馆", "missing": "第二处室内景点",
+                }, ensure_ascii=False))
+
+            async def astream(self, messages):
+                if messages[-1].content == QUESTION:
+                    payload = {"tasks": TASKS}
+                else:
+                    has_second = second in messages[0].content
+                    payload = {"items": [{"name": "甲博物馆", "source": 2 if has_second else 1, "quote": first}]}
+                    if has_second:
+                        payload["items"].append({"name": "乙展览馆", "source": 1, "quote": second})
+                yield AIMessageChunk(content=json.dumps(payload, ensure_ascii=False))
+
+        async def collect():
+            graph = await build_agent(memory_db_path=None, initial_question=QUESTION)
+            return [event async for event in stream_events(graph, QUESTION, "compound-iterative")]
+
+        for max_calls in (2, 6):
+            with (
+                self.subTest(max_calls=max_calls),
+                patch.dict("os.environ", {"AGENT_DEEPSEEK_FETCH_ENABLED": ""}),
+                patch("backend.app.agent.service.load_governance", return_value={"maxToolCalls": max_calls}),
+                patch("backend.app.agent.service.create_chat_model", return_value=Model()),
+                patch("backend.app.agent.tools.query_weather", return_value=f"杭州天气预报（{tomorrow}）：小雨；最高气温 20°C。") as weather,
+                patch("backend.app.agent.tools.DDGS") as search,
+            ):
+                search.return_value.text.side_effect = [[{"href": first_url, "body": first}], [{"href": second_url, "body": second}]]
+                frames = asyncio.run(collect())
+                weather.assert_called_once()
+                self.assertEqual(search.return_value.text.call_count, 2 if max_calls == 6 else 1)
+                self.assertIn(first_url, frames[-1]["content"])
+                if max_calls == 6:
+                    self.assertEqual(search.return_value.text.call_args.args[0], "杭州 室内景点 室内展览馆")
+                    self.assertIn(second_url, frames[-1]["content"])
+                    self.assertEqual(sum(event["type"] == "evidence_retry" for event in frames), 1)
+                else:
+                    self.assertIn("暂未核实更多", frames[-1]["content"])
+                    quality = next(event for event in frames if event["type"] == "quality")
+                    self.assertTrue(quality["passed"] and quality["partial"])
+        self.assertEqual(len(reviewed), 1)

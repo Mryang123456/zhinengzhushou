@@ -11,7 +11,8 @@ trace_id: ContextVar[str] = ContextVar("trace_id", default="-")
 metrics: Counter[str] = Counter()
 duration_sums: Counter[str] = Counter()
 duration_counts: Counter[str] = Counter()
-logger = logging.getLogger("langgraph_agent.events")
+# 继承 Uvicorn 的服务日志配置，默认启动方式也会输出 INFO 级结构化事件。
+logger = logging.getLogger("uvicorn.error.langgraph_agent.events")
 
 
 def increment(name: str, amount: int = 1) -> None:

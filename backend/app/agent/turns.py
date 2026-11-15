@@ -5,6 +5,8 @@ from contextlib import aclosing, asynccontextmanager
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
+from backend.app.agent.plan_progress import plan_progress
+from backend.app.observability import event
 from backend.app.quality.web_activity import search_highlights
 from backend.app.quality.validator import cited_web_sources, web_result_urls
 
@@ -65,15 +67,22 @@ async def stream_events(
     question_message = HumanMessage(content=question, id=stable_id)
     messages: list[BaseMessage] = [question_message]
     seen_web_urls: set[str] = set()
+    track_plan = False
+    last_plan_frame = None
     input_state: dict | None = {"messages": messages, "retry": retry, "durable_run_id": run_id}
     if stable_id is not None:
         snapshot = await app.aget_state(config)
         history = snapshot.values.get("messages", [])
         if run_id and snapshot.values.get("durable_run_id") == run_id:
+            if "intent" not in snapshot.next:
+                track_plan = bool(snapshot.values.get("intent", {}).get("tasks"))
+                if track_plan and (last_plan_frame := plan_progress(snapshot.values)):
+                    yield last_plan_frame
             if snapshot.values.get("finished_run_id") == run_id and history and isinstance(history[-1], AIMessage):
                 yield _done_event(history[-1].content, history)
                 return
             input_state = None
+            event("chat_checkpoint_resumed", compound=track_plan)
             start = next((i for i in range(len(history) - 1, -1, -1) if isinstance(history[i], HumanMessage)), 0)
             seen_web_urls = web_result_urls(history[start:]) or set()
         else:
@@ -87,15 +96,25 @@ async def stream_events(
     async with aclosing(app.astream(
         input_state,
         config=config,
-        stream_mode=["custom", "updates"],
+        stream_mode=["custom", "updates", "values"],
         **options,
     )) as events:
         async for mode, payload in events:
+            if mode == "values":
+                if track_plan:
+                    frame = plan_progress(payload)
+                    if frame and frame != last_plan_frame:
+                        last_plan_frame = frame
+                        yield frame
+                continue
             if mode == "custom":
                 if payload.get("type") == "token":
                     final_answer += payload.get("content", "")
                 yield payload
                 continue
+            intent_update = payload.get("intent")
+            if isinstance(intent_update, dict):
+                track_plan = bool(intent_update.get("intent", {}).get("tasks"))
             tool_update = payload.get("tools")
             if isinstance(tool_update, dict):
                 tool_messages = tool_update.get("messages", [])

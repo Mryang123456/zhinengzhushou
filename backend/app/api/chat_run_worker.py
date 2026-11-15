@@ -12,7 +12,7 @@ from backend.app.agent.service import build_agent
 from backend.app.agent.turn_gate import thread_lock_key
 from backend.app.agent.turns import checkpoint_config, stream_events
 from backend.app.config import MCP_CONFIG_FILE, MEMORY_DB_FILE
-from backend.app.observability import increment
+from backend.app.observability import increment, trace_id
 from backend.app.mcp.governance import mcp_enabled
 from backend.app.security import account_enabled
 
@@ -100,7 +100,11 @@ async def _process_next(store):
                         continue
                     claim = await store.claim(conn, run_id)
                     if claim:
-                        await _execute(store, conn, run_id, user_id, thread_id, claim)
+                        trace = trace_id.set(str(run_id))
+                        try:
+                            await _execute(store, conn, run_id, user_id, thread_id, claim)
+                        finally:
+                            trace_id.reset(trace)
                         return True
                 except asyncio.CancelledError:
                     # 取消可能发生在数据库已经加锁、但本地还没有读到结果时。

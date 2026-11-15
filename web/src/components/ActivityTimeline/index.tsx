@@ -1,10 +1,12 @@
 import { ChevronDown, ExternalLink, FileText, Search } from "lucide-react";
 import type { Message } from "../../types";
-import { currentActivityStatus, summarizeActivity } from "../../features/chat/messageEvents";
+import { currentActivityStatus, planStatusLabels, summarizeActivity } from "../../features/chat/messageEvents";
 import "./style.css";
 
 export function ActivityTimeline({ message }: { message: Message }) {
   const steps = message.toolEvents ?? [];
+  const plan = message.planSteps ?? [];
+  const hasDetails = steps.length > 0 || plan.length > 0;
   const timings = steps.filter((step): step is string => typeof step === "string" && step.startsWith("阶段耗时："));
   const hasSearchDetails = steps.some((step) => typeof step === "object" && step.kind);
   const visibleSteps = steps.filter((step, index) => {
@@ -16,19 +18,21 @@ export function ActivityTimeline({ message }: { message: Message }) {
     return step !== "正在搜索公开资料" || typeof next !== "object" || next.kind !== "queries";
   });
   const status = currentActivityStatus(message);
+  const activeStep = plan.find((step) => ["running", "reviewing", "supplementing"].includes(step.status));
   const duration = typeof message.elapsedMs === "number" && Number.isFinite(message.elapsedMs) && message.elapsedMs >= 0
     ? message.elapsedMs < 1000 ? " · 不到 1 秒" : ` · 用时 ${Math.round(message.elapsedMs / 1000)} 秒`
     : "";
   const activitySummary = summarizeActivity(message);
-  if (!steps.length && !message.pending) return null;
+  if (!hasDetails && !message.pending) return null;
 
   const title = message.pending
-    ? message.content && !message.retryable ? "正在展示回答…" : status
+    ? message.content && !message.retryable ? "正在展示回答…"
+      : activeStep ? `${planStatusLabels[activeStep.status]} · ${activeStep.title}` : status
     : message.approval?.status === "pending" ? "等待确认"
       : message.notice ? "处理已中断"
         : `查询过程${duration}${!duration && activitySummary ? ` · ${activitySummary}` : ""}`;
 
-  if (!steps.length) return <div className="chat-activity-status" role="status">{title}</div>;
+  if (!hasDetails) return <div className="chat-activity-status" role="status">{title}</div>;
 
   return (
     <details className="chat-activity">
@@ -37,6 +41,14 @@ export function ActivityTimeline({ message }: { message: Message }) {
         <span role="status">{title}</span>
         <ChevronDown className="chat-activity-chevron" size={15} aria-hidden="true" />
       </summary>
+      {plan.length > 0 && <ul className="chat-activity-plan" aria-label="任务进度">
+        {plan.map((step) => <li key={step.id}>
+          <span>{step.title}</span>
+          <span className="chat-activity-plan-status" data-status={step.status}>
+            {planStatusLabels[step.status]}{step.reason ? ` · ${step.reason}` : ""}
+          </span>
+        </li>)}
+      </ul>}
       <ol className="chat-activity-steps" aria-label="查询过程">
         {visibleSteps.map((step, index) => (
           <li key={index} aria-current={message.pending && index === visibleSteps.length - 1 ? "step" : undefined}>

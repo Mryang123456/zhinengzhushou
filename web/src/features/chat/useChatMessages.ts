@@ -92,6 +92,7 @@ export function useChatMessages({ apiUrl, apiKey, accessToken, activeSession, up
     const resume = lastReply.resume;
     updateMessage(sessionId, lastReply.id, (item) => ({
       ...item, pending: true, notice: undefined, elapsedMs: undefined, toolEvents: resume ? item.toolEvents : [],
+      planSteps: resume ? item.planSteps : undefined,
     }));
     void runReply(sessionId, lastReply.id, lastQuestion, { retry: !resume, resume, recover: lastReply.submission });
   };
@@ -100,6 +101,7 @@ export function useChatMessages({ apiUrl, apiKey, accessToken, activeSession, up
     if (!canRegenerate || !lastReply || !lastQuestion || isRunning(sessionId)) return;
     updateMessage(sessionId, lastReply.id, (item) => ({
       ...item, content: "", sources: undefined, elapsedMs: undefined, pending: true, retryable: true, toolEvents: [],
+      planSteps: undefined,
     }));
     void runReply(sessionId, lastReply.id, lastQuestion, { retry: true });
   };

@@ -54,10 +54,14 @@ class ToolRoutingTests(unittest.TestCase):
         self.assertTrue(first["a"] and first["b"])
         previous = [message.model_copy(update={"content": json.dumps(first[message.tool_call_id])}) for message in batch]
         followup = result("web_search", "c", range(100))
-        second = select_web_results(previous, [followup], reserve_retry=False)
-        self.assertEqual(len(second["c"]), 5)
+        second = select_web_results(previous, [followup], reserve_retry=True, reserved_pages=2)
+        self.assertEqual(len(second["c"]), 3)
         saved = followup.model_copy(update={"content": json.dumps(second["c"])})
-        self.assertEqual(web_result_count([*previous, saved]), 50)
+        final = result("web_search", "d", range(100))
+        third = select_web_results([*previous, saved], [final], reserve_retry=False)
+        self.assertEqual(len(third["d"]), 2)
+        final = final.model_copy(update={"content": json.dumps(third["d"])})
+        self.assertEqual(web_result_count([*previous, saved, final]), 50)
 
     def test_web_answer_sources_keeps_all_unique_search_sites(self):
         import json
@@ -72,6 +76,16 @@ class ToolRoutingTests(unittest.TestCase):
         sources = web_answer_sources("查询来源", [message])
 
         self.assertEqual(len(sources), 15)
+
+    def test_compound_web_results_share_links_between_tasks_without_exceeding_the_batch_limit(self):
+        import json
+        from backend.app.quality.web_result_budget import select_web_results
+
+        records = [{"href": f"https://example.org/{i}", "body": f"正文 {i}"} for i in range(10)]
+        previous = ToolMessage(json.dumps(records[:2]), name="web_search", tool_call_id="first")
+        current = ToolMessage(json.dumps([records[0], *records]), name="web_search", tool_call_id="second")
+        selected = select_web_results([previous], [current], reserve_retry=False, per_tool_limit=5)
+        self.assertEqual([record["href"] for record in selected["second"]], [record["href"] for record in records[:5]])
 
     def test_search_synthesizes_late_passages_into_a_cited_markdown_answer(self):
         import json
@@ -115,7 +129,7 @@ class ToolRoutingTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"AGENT_DEEPSEEK_FETCH_ENABLED": ""}),
             patch("backend.app.agent.service.create_chat_model", return_value=Model()),
-            patch("backend.app.agent.service.resolve_intent", new=AsyncMock(return_value=SemanticIntent(
+            patch("backend.app.agent.intent_node.resolve_intent", new=AsyncMock(return_value=SemanticIntent(
                 route="search", question=question, query=question,
             ))),
             patch("backend.app.agent.tools.DDGS") as search,
@@ -225,7 +239,7 @@ class ToolRoutingTests(unittest.TestCase):
                     patch.dict(os.environ, {"AGENT_DEEPSEEK_FETCH_ENABLED": ""}),
                     patch("backend.app.agent.service.create_chat_model", return_value=Model()),
                     patch(
-                        "backend.app.agent.service.enrich_search_results",
+                        "backend.app.agent.tool_execution.enrich_search_results",
                         new=AsyncMock(side_effect=lambda content, _query, *, read_pages: content),
                     ) as enrich,
                     patch("backend.app.agent.tools.DDGS") as search,
@@ -311,7 +325,7 @@ class ToolRoutingTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"AGENT_DEEPSEEK_FETCH_ENABLED": ""}),
             patch("backend.app.agent.service.create_chat_model", return_value=Model()),
-            patch("backend.app.agent.service.resolve_intent", new=AsyncMock(return_value=SemanticIntent(
+            patch("backend.app.agent.intent_node.resolve_intent", new=AsyncMock(return_value=SemanticIntent(
                 route="search",
                 question=question,
                 query="2026 KPL 11月14日 总决赛 场馆",
@@ -359,7 +373,7 @@ class ToolRoutingTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"AGENT_DEEPSEEK_FETCH_ENABLED": ""}),
             patch("backend.app.agent.service.create_chat_model", return_value=Model()),
-            patch("backend.app.agent.service.resolve_intent", new=AsyncMock(return_value=SemanticIntent(
+            patch("backend.app.agent.intent_node.resolve_intent", new=AsyncMock(return_value=SemanticIntent(
                 route="search", question=question, query=question,
             ))),
             patch("backend.app.agent.tools.DDGS") as search,
@@ -429,7 +443,7 @@ class ToolRoutingTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"AGENT_DEEPSEEK_FETCH_ENABLED": ""}),
             patch("backend.app.agent.service.create_chat_model", return_value=Model()),
-            patch("backend.app.agent.service.resolve_intent", new=AsyncMock(return_value=SemanticIntent(
+            patch("backend.app.agent.intent_node.resolve_intent", new=AsyncMock(return_value=SemanticIntent(
                 route="search", question=question, query="海岚艺术节 举办地",
             ))),
             patch("backend.app.agent.tools.DDGS") as search,
@@ -555,6 +569,74 @@ class ToolRoutingTests(unittest.TestCase):
             self.assertEqual(search.return_value.text.call_count, 2)
         self.assertIn("17:00闭馆", frames[-1]["content"])
         self.assertIn("门票金额暂未查到", frames[-1]["content"])
+
+    def test_public_search_reconsiders_new_results_and_stops_within_budget(self):
+        import json
+        from backend.app.intent.semantic import SemanticIntent
+
+        question = "青岚展会在哪举行，几点开幕"
+        queries = ["青岚展会 举办地", "青岚展会 具体场馆", "青岚展会 开幕时间", "青岚展会 官方日程"]
+        records = [
+            {"href": "https://example.org/overview", "body": "青岚展会将在宁港举行。"},
+            {"href": "https://example.org/venue", "body": "青岚展会场馆为宁港会展中心。"},
+            {"href": "https://example.org/schedule", "body": "青岚展会上午九点开幕。"},
+        ]
+        test = self
+
+        class Model:
+            def __init__(self, scenario):
+                self.scenario = scenario
+
+            async def ainvoke(self, messages):
+                data = json.loads(messages[-1].content)
+                count = len(data["已尝试"])
+                if count > 1:
+                    test.assertEqual(data["上轮待核实"], "具体场馆和开幕时间")
+                if count == 2 and self.scenario == "repeat":
+                    query = "青岚展会，具体场馆！"
+                else:
+                    query = queries[count]
+                return AIMessage(content=json.dumps({"action": "search", "query": query, "missing": "具体场馆和开幕时间"}))
+
+            async def astream(self, messages):
+                excerpts = [msg.content for msg in messages if isinstance(msg, ToolMessage)]
+                if any("上午九点" in item for item in excerpts):
+                    yield AIMessageChunk(content="青岚展会上午九点开幕。[S1]")
+                else:
+                    yield AIMessageChunk(content="青岚展会将在宁港举行。[S1]，开幕时间待核实。")
+
+        async def collect():
+            graph = await build_agent(memory_db_path=None, initial_question=question)
+            return [frame async for frame in stream_events(graph, question, "iterative-web")]
+
+        for scenario, batches, count in (
+            ("budget", [[record] for record in records], 3),
+            ("no-new-excerpt", [[records[0]], [{**records[0], "href": "https://example.com/reprint"}]], 2),
+            ("repeat", [[records[0]], [records[1]]], 2),
+        ):
+            with (
+                self.subTest(scenario=scenario),
+                patch.dict(os.environ, {"AGENT_DEEPSEEK_FETCH_ENABLED": ""}),
+                patch("backend.app.agent.service.create_chat_model", return_value=Model(scenario)),
+                patch("backend.app.agent.intent_node.resolve_intent", new=AsyncMock(return_value=SemanticIntent(
+                    route="search", question=question, query=queries[0],
+                ))),
+                patch("backend.app.agent.tools.DDGS") as search,
+            ):
+                search.return_value.text.side_effect = batches
+                with self.assertLogs("uvicorn.error.langgraph_agent.events", level="INFO") as captured:
+                    frames = asyncio.run(collect())
+                self.assertEqual([call.args[0] for call in search.return_value.text.call_args_list], queries[:count])
+                self.assertEqual(sum(event["type"] == "evidence_retry" for event in frames), count - 1)
+                last_review = [event for event in frames if event["type"] == "evidence_review"][-1]
+                self.assertEqual(last_review.get("stop_reason"), {
+                    "budget": "budget_exhausted", "no-new-excerpt": "no_new_evidence", "repeat": None,
+                }[scenario])
+                events_logged = [json.loads(record.getMessage()) for record in captured.records]
+                stopped = next(record for record in events_logged if record["event"] == "evidence_review_partial")
+                self.assertEqual(stopped["stop_reason"], last_review.get("stop_reason"))
+                self.assertNotIn(question, " ".join(captured.output))
+                self.assertIn("上午九点" if scenario == "budget" else "待核实", frames[-1]["content"])
 
     def test_verification_followup_uses_only_an_explicit_event_in_the_same_thread(self):
         followup = "帮我查证"
