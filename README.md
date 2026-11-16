@@ -8,6 +8,10 @@
 
 项目按照 UI 层、Agent 编排层、工具层、知识层和集成层组织，完整的分层职责、运行流程及可维护 Mermaid 源图见 [架构说明](docs/architecture/architecture.md)。
 
+## 可选 Java Service
+
+`java-service/` 提供独立的 Spring Boot 业务服务基础框架。目前仅包含健康检查、统一响应、异常处理、Trace ID 和 Python Agent 就绪探测，不接管认证、会话、数据库或前端请求，因此不会改变现有 React → FastAPI 链路。后续出现明确业务需求时，可逐步让 Java 承担用户、租户、权限和业务事务，Python 继续负责 LangGraph、RAG、MCP 与模型调用。启动和验证方法见 [Java Service 说明](java-service/README.md)。
+
 ## 能力边界
 
 - 使用 GPT 回答问题；

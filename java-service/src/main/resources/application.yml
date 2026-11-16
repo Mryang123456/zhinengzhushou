@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: zhixing-service
+  webflux:
+    problemdetails:
+      enabled: true
+
+server:
+  port: ${JAVA_SERVICE_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: 智行助手 Java 业务服务基础框架
+    version: 0.1.0
+
+agent:
+  base-url: ${AGENT_BASE_URL:http://127.0.0.1:8000}
+  api-key: ${AGENT_API_KEY:}
+  connect-timeout: ${AGENT_CONNECT_TIMEOUT:2s}
+  read-timeout: ${AGENT_READ_TIMEOUT:5s}
+
+logging:
+  pattern:
+    level: "%5p [traceId:%X{traceId:-}]"
+
