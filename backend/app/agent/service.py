@@ -27,7 +27,7 @@ from backend.app.agent.evidence_node import (
     review_evidence,
 )
 from backend.app.agent.intent_node import identify_intent
-from backend.app.agent.model_node import SYSTEM_PROMPT, call_model
+from backend.app.agent.model_node import call_model
 from backend.app.agent.tool_execution import (
     execute_tools,
     sanitize_web_search_output as sanitize_web_search_output,
@@ -43,6 +43,7 @@ from backend.app.agent.tools import (
     weather_code_description as weather_code_description,
     web_search as web_search,
 )
+from backend.app.prompts import prompt_text
 from backend.app.agent.turns import (
     ask as ask,
     checkpoint_config as checkpoint_config,
@@ -251,7 +252,7 @@ async def continue_after_approved_mcp(question: str, tool_name: str, tool_result
     """将人工确认后的工具结果重新经过受控续答与质量门，不直接把原始输出给用户。"""
     model = create_chat_model()
     response = await model.ainvoke([
-        SystemMessage(SYSTEM_PROMPT + "\n你只可依据给出的已确认工具结果回答原始问题；如证据不足请明确说明。"),
+        SystemMessage(prompt_text("agent.system") + "\n" + prompt_text("mcp.approved_answer")),
         HumanMessage(f"原始问题：{question}\n\n已确认工具：{tool_name}\n工具结果：\n{tool_result}"),
     ])
     answer = content_to_text(response.content)

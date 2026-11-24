@@ -22,6 +22,7 @@ from backend.app.agent.turns import checkpoint_config, checkpoint_scope, stream_
 from backend.app.api.chat_history import serialize_chat_history
 from backend.app.api.chat_run_store import ChatRunStore, SubmissionConflict, TERMINAL
 from backend.app.api.chat_run_worker import run_chat_worker
+from backend.app.api.chat_run_reaper import run_chat_reaper
 from backend.app.api.readiness import dependency_status, queue_metrics
 from backend.app.config import MCP_APPROVAL_DB_FILE, MCP_CONFIG_FILE, MEMORY_DB_FILE
 from backend.app.mcp.approval import create_approval_store
@@ -30,12 +31,19 @@ from backend.app.models.factory import ModelConfigurationError, ensure_model_rea
 from backend.app.intent.policy import casual_reply
 from backend.app.security import AuthenticationError, AuthenticatedUser, authenticate_bearer, auth_required, create_rate_limiter, issue_access_token, login_rate_identity, validate_multi_instance_configuration, validate_production_configuration, valid_api_key, verify_bootstrap_credentials
 from backend.app.observability import event, observe_duration, prometheus_metrics, trace_id
+from backend.app.prompts import prompt_manifest, prompt_manifest_hash, prompt_scope
 from backend.app.content_safety import is_direct_prompt_override
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """本地与 PostgreSQL Checkpoint 都由应用生命周期统一管理。"""
+    startup_manifest = prompt_manifest()
+    event(
+        "prompt_registry_validated",
+        prompt_manifest_hash=prompt_manifest_hash(startup_manifest),
+        prompt_count=len(startup_manifest),
+    )
     database_url = os.getenv("CHECKPOINT_DATABASE_URL")
     application.state.checkpointer = MemorySaver() if not database_url else None
     application.state.checkpoint_pool = None
@@ -50,7 +58,9 @@ async def lifespan(application: FastAPI):
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
             from psycopg_pool import AsyncConnectionPool
-            pool_size = max(2, int(os.getenv("CHECKPOINT_POOL_MAX_SIZE", "10")))
+            # 每个执行中的 Worker 持有一条 Checkpoint/会话锁连接，心跳再使用一条独立连接。
+            # 至少额外保留一条连接给 HTTP 查询、reaper 和迁移。
+            pool_size = max(3, int(os.getenv("CHECKPOINT_POOL_MAX_SIZE", "10")))
             pool = AsyncConnectionPool(
                 conninfo=database_url,
                 kwargs={"autocommit": True, "prepare_threshold": 0},
@@ -71,8 +81,10 @@ async def lifespan(application: FastAPI):
             application.state.checkpoint_pool = pool
             application.state.checkpointer = checkpointer
             application.state.chat_runs = store
-            worker_count = min(pool_size - 1, max(1, int(os.getenv("AGENT_RUN_WORKERS", "2"))))
+            worker_capacity = max(1, (pool_size - 1) // 2)
+            worker_count = min(worker_capacity, max(1, int(os.getenv("AGENT_RUN_WORKERS", "2"))))
             workers.extend(asyncio.create_task(run_chat_worker(store)) for _ in range(worker_count))
+            workers.append(asyncio.create_task(run_chat_reaper(store), name="chat-run-reaper"))
         except Exception:
             # 已创建的连接池也必须关闭，避免启动失败后遗留连接。
             pool = pool or getattr(application.state, "checkpoint_pool", None)
@@ -356,6 +368,15 @@ async def chat_stream(
     except ModelConfigurationError as error:
         raise HTTPException(status_code=500, detail=f"模型配置错误：{error}") from error
 
+    run_prompt_manifest = prompt_manifest()
+    run_prompt_manifest_hash = prompt_manifest_hash(run_prompt_manifest)
+    event(
+        "prompt_manifest_selected",
+        user_id=user.user_id,
+        thread_id=request.thread_id,
+        prompt_manifest_hash=run_prompt_manifest_hash,
+        prompt_versions={item["prompt_id"]: item["version"] for item in run_prompt_manifest},
+    )
     store = getattr(app.state, "chat_runs", None)
     if store is not None:
         if request.recover_submission and request.retry and request.attempt_id is None:
@@ -368,6 +389,8 @@ async def chat_stream(
             run_id = await store.submit(user.user_id, request.thread_id, message_id, attempt_id, {
                 "question": request.question, "retry": request.retry,
                 "use_memory": request.use_memory, "use_mcp": request.use_mcp and mcp_enabled(),
+                "prompt_manifest": run_prompt_manifest,
+                "prompt_manifest_hash": run_prompt_manifest_hash,
             })
         except SubmissionConflict as error:
             raise HTTPException(409, detail=str(error)) from error
@@ -409,13 +432,18 @@ async def chat_stream(
                     async for frame in frames:
                         yield frame
 
+    async def advance_with_prompt_scope(frames):
+        # 每次推进生成器都在新Task中执行，必须在该Task内重新注入固定版本。
+        with prompt_scope(run_prompt_manifest):
+            return await anext(frames)
+
     async def generate():
         started = time.monotonic()
         try:
             yield 'event: progress\ndata: {"type":"progress","stage":"preparing"}\n\n'
             async with asyncio.timeout(None) as deadline:
                 frames = run_turn(deadline)
-                next_event = asyncio.create_task(anext(frames))
+                next_event = asyncio.create_task(advance_with_prompt_scope(frames))
                 try:
                     while True:
                         done, _ = await asyncio.wait({next_event}, timeout=15)
@@ -432,7 +460,7 @@ async def chat_stream(
                         if frame["type"] == "done":
                             frame = {**frame, "elapsed_ms": round((time.monotonic() - started) * 1000)}
                         yield f"event: {frame['type']}\ndata: {json.dumps(frame, ensure_ascii=False)}\n\n"
-                        next_event = asyncio.create_task(anext(frames))
+                        next_event = asyncio.create_task(advance_with_prompt_scope(frames))
                 finally:
                     with CancelScope(shield=True):
                         if not next_event.done():

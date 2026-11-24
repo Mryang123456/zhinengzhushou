@@ -12,6 +12,7 @@ from langgraph.config import get_stream_writer
 
 from backend.app.agent.context import content_to_text, incomplete_tool_message_ids, split_turns
 from backend.app.agent.telemetry import observe_async_operation
+from backend.app.prompts import prompt_text
 from backend.app.agent.workflow_state import AgentState
 from backend.app.intent.capabilities import describe_capabilities
 from backend.app.intent.followup import resolve_weather_followup
@@ -154,17 +155,7 @@ async def identify_intent(
         and planning_candidate(question)
     ):
         schema = json.dumps(IntentPlan.model_json_schema(), ensure_ascii=False)
-        prompt = SystemMessage(
-            "你只负责拆解只读任务。只输出符合 JSON Schema 的 JSON 对象，不使用代码围栏。"
-            "仅当用户实际要求多个天气或公开搜索子任务时才返回计划，否则返回空 tasks。"
-            "按用户原文出现顺序拆分。text 必须是包含本项动作及其对象的连续原文；"
-            "天气子任务的 location 和 date 必须出现在这段 text 里。"
-            "比如“查明天上海天气，同时查后天广州气温”应分别保留“查明天上海天气”和“查后天广州气温”，"
-            "日期字段直接填“明天”和“后天”。不要计算日历日期或替换词语。字段缺失用默认值。"
-            "下雨才执行的任务标记 if_rain，depends_on 使用前置天气任务的零基索引。"
-            "同一地点在后续任务中省略时可留空，由后端继承。有明确否定、未支持的条件或写操作时返回空 tasks。\n"
-            + schema
-        )
+        prompt = SystemMessage(prompt_text("intent.plan") + "\nJSON Schema：" + schema)
         try:
             async with asyncio.timeout(8):
                 async with observe_async_operation("intent_planning"):

@@ -20,6 +20,15 @@ groups:
         expr: increase(agent_events_total{event="chat_recovery_exhausted"}[10m]) > 0
         labels: { severity: critical }
         annotations: { summary: "聊天任务耗尽接管次数" }
+      - alert: AgentExpiredRunLease
+        expr: agent_chat_expired_leases > 0
+        for: 2m
+        labels: { severity: warning }
+        annotations: { summary: "存在超过两分钟仍未被回收的聊天任务租约" }
+      - alert: AgentStaleWorkerFenced
+        expr: increase(agent_events_total{event="chat_stale_worker_fenced"}[10m]) > 0
+        labels: { severity: warning }
+        annotations: { summary: "旧 Worker 在失去租约后尝试提交结果，已被 fencing 拒绝" }
       - alert: AgentMcpFailureRate
         expr: >-
           sum(increase(agent_events_total{event=~"mcp_tool_failed|mcp_tool_outcome_unknown"}[10m]))

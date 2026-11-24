@@ -9,14 +9,27 @@ CREATE TABLE IF NOT EXISTS chat_runs (
     status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0,
     cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    lease_owner TEXT,
+    lease_token UUID,
+    lease_expires_at TIMESTAMPTZ,
+    heartbeat_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at TIMESTAMPTZ,
     UNIQUE (user_id, thread_id, request_id)
 );
+ALTER TABLE chat_runs ADD COLUMN IF NOT EXISTS lease_owner TEXT;
+ALTER TABLE chat_runs ADD COLUMN IF NOT EXISTS lease_token UUID;
+ALTER TABLE chat_runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE chat_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
+UPDATE chat_runs SET status = 'queued', lease_owner = NULL, lease_token = NULL,
+    lease_expires_at = NULL, heartbeat_at = NULL
+    WHERE status = 'running' AND lease_expires_at IS NULL;
 CREATE INDEX IF NOT EXISTS chat_runs_pending_order ON chat_runs(position)
     WHERE status IN ('queued', 'running');
 CREATE INDEX IF NOT EXISTS chat_runs_pending_thread ON chat_runs(user_id, thread_id, position)
     WHERE status IN ('queued', 'running');
+CREATE INDEX IF NOT EXISTS chat_runs_expired_lease ON chat_runs(lease_expires_at)
+    WHERE status = 'running';
 CREATE TABLE IF NOT EXISTS chat_run_events (
     id BIGSERIAL PRIMARY KEY,
     run_id UUID NOT NULL REFERENCES chat_runs(id) ON DELETE CASCADE,

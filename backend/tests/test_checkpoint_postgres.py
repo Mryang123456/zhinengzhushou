@@ -16,6 +16,7 @@ from backend.app.agent.turn_gate import thread_lock_key
 from backend.app.agent.turns import ask, checkpoint_config, checkpoint_scope, stream_events
 from backend.app.api.chat_history import serialize_chat_history
 from backend.app.api.chat_run_store import ChatRunStore
+from backend.app.api.run_lease import LeaseLost
 
 
 @unittest.skipUnless(os.getenv("TEST_CHECKPOINT_DATABASE_URL"), "未设置 PostgreSQL 专用测试库")
@@ -34,9 +35,10 @@ class PostgresCheckpointTests(unittest.TestCase):
                 run_id = await store.submit(owner, thread, message_id, message_id, {"question": "查报告"})
                 try:
                     async with pool.connection() as conn:
-                        await store.claim(conn, run_id)
-                    await store.publish(run_id, 1, {"type": "tool_end", "tools": ["web_search"], "web_result_count": 2})
-                    await store.publish(run_id, 1, {"type": "approval_required", "confirmation_token": "不应进入历史"})
+                        claim = await store.claim(conn, run_id, "integration-worker", 30)
+                    lease_token = claim[-1]
+                    await store.publish(run_id, lease_token, {"type": "tool_end", "tools": ["web_search"], "web_result_count": 2})
+                    await store.publish(run_id, lease_token, {"type": "approval_required", "confirmation_token": "不应进入历史"})
                     before = await store.events(owner, run_id, 0)
                     async with checkpoint_scope(database) as saver:
                         graph = await build_agent(memory_db_path=None, checkpointer=saver)
@@ -54,7 +56,7 @@ class PostgresCheckpointTests(unittest.TestCase):
                         await saver.adelete_thread(config["configurable"]["thread_id"])
 
                     async with pool.connection() as conn:
-                        await store.finish(conn, run_id, {**frames[-1], "sources": sources}, frames[:-1])
+                        await store.finish(conn, run_id, lease_token, {**frames[-1], "sources": sources}, frames[:-1])
                     replay = await store.events(owner, run_id, before[-1][1])
                     self.assertEqual([event[2]["type"] for event in replay], ["token", "done"])
                     history = serialize_chat_history(await store.recent_sessions(owner))
@@ -81,6 +83,40 @@ class PostgresCheckpointTests(unittest.TestCase):
                     self.assertTrue((await (await first.execute(sql, (key,))).fetchone())[0])
                     self.assertFalse((await (await second.execute(sql, (key,))).fetchone())[0])
                 self.assertTrue((await (await second.execute(sql, (key,))).fetchone())[0])
+
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop if sys.platform == "win32" else None) as runner:
+            runner.run(exercise())
+
+    def test_expired_lease_is_reaped_and_stale_worker_is_fenced(self):
+        database = os.environ["TEST_CHECKPOINT_DATABASE_URL"]
+        owner, thread, message_id = uuid4().hex, uuid4().hex, uuid4()
+
+        async def exercise():
+            async with AsyncConnectionPool(database, open=False, kwargs={"autocommit": True}) as pool:
+                store = ChatRunStore(pool)
+                await store.setup()
+                run_id = await store.submit(owner, thread, message_id, message_id, {"question": "租约接管测试"})
+                try:
+                    async with pool.connection() as conn:
+                        first = await store.claim(conn, run_id, "worker-old", 30)
+                        await conn.execute(
+                            "UPDATE chat_runs SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = %s",
+                            (run_id,),
+                        )
+                        self.assertEqual(await store.reap_expired(conn), [run_id])
+                        second = await store.claim(conn, run_id, "worker-new", 30)
+                    self.assertEqual(second[2], 2)
+                    with self.assertRaises(LeaseLost):
+                        await store.publish(run_id, first[-1], {"type": "progress", "stage": "stale"})
+                    async with pool.connection() as conn:
+                        with self.assertRaises(LeaseLost):
+                            await store.finish(conn, run_id, first[-1], {"type": "done", "content": "旧结果"})
+                        await store.finish(conn, run_id, second[-1], {"type": "done", "content": "新结果"})
+                    events = await store.events(owner, run_id, 0)
+                    self.assertEqual([row[2].get("content") for row in events if row[2].get("type") == "done"], ["新结果"])
+                finally:
+                    async with pool.connection() as conn:
+                        await conn.execute("DELETE FROM chat_runs WHERE id = %s", (run_id,))
 
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop if sys.platform == "win32" else None) as runner:
             runner.run(exercise())

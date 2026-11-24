@@ -8,8 +8,15 @@ from psycopg.types.json import Jsonb
 from backend.app.agent.turn_gate import thread_lock_key
 from backend.app.api.chat_history import PUBLIC_ACTIVITY
 from backend.app.config import BACKEND_ROOT
+from backend.app.api.run_lease import LeaseLost
 
 TERMINAL = {"completed", "failed", "cancelled"}
+
+
+def _submission_parameters(payload):
+    """服务端选择的 Prompt 版本不参与客户端请求幂等性判断。"""
+    return {key: value for key, value in payload.items()
+            if key not in {"prompt_manifest", "prompt_manifest_hash"}}
 
 
 class SubmissionConflict(ValueError):
@@ -45,7 +52,7 @@ class ChatRunStore:
                 (user_id, thread_id, request_id),
             )
             existing = await cursor.fetchone()
-            if existing[1:] != (message_id, payload):
+            if existing[1] != message_id or _submission_parameters(existing[2]) != _submission_parameters(payload):
                 raise SubmissionConflict("该请求 ID 已用于其他消息或参数。")
             return existing[0]
 
@@ -81,7 +88,7 @@ class ChatRunStore:
             if row and row[0] not in TERMINAL:
                 await conn.execute("UPDATE chat_runs SET cancel_requested = TRUE WHERE id = %s", (run_id,))
                 if row[0] == "queued":
-                    await self.finish(conn, run_id, {"type": "error"})
+                    await self._finish_queued_cancellation(conn, run_id)
             return row[0] if row else None
 
     async def events(self, user_id, run_id, after):
@@ -137,7 +144,7 @@ class ChatRunStore:
         cursor = await conn.execute(
             """
             SELECT r.position, r.id, r.user_id, r.thread_id
-            FROM chat_runs r WHERE r.status IN ('queued', 'running') AND r.position > %s
+            FROM chat_runs r WHERE r.status = 'queued' AND r.position > %s
             AND NOT EXISTS (
                 SELECT 1 FROM chat_runs older
                 WHERE older.user_id = r.user_id AND older.thread_id = r.thread_id AND older.position < r.position
@@ -149,43 +156,85 @@ class ChatRunStore:
         return await cursor.fetchall()
 
     @staticmethod
-    async def claim(conn, run_id):
+    async def claim(conn, run_id, worker_id: str, lease_seconds: float):
+        lease_token = uuid4()
         cursor = await conn.execute(
             """
-            UPDATE chat_runs SET status = 'running', attempts = attempts + 1
-            WHERE id = %s AND status IN ('queued', 'running')
-            RETURNING message_id, payload, attempts, cancel_requested
+            UPDATE chat_runs SET status = 'running', attempts = attempts + 1,
+                lease_owner = %s, lease_token = %s,
+                heartbeat_at = clock_timestamp(),
+                lease_expires_at = clock_timestamp() + make_interval(secs => %s)
+            WHERE id = %s AND status = 'queued'
+            RETURNING message_id, payload, attempts, cancel_requested, lease_token
             """,
-            (run_id,),
+            (worker_id, lease_token, lease_seconds, run_id),
         )
         return await cursor.fetchone()
+
+    @staticmethod
+    async def reap_expired(conn, limit: int = 32):
+        cursor = await conn.execute(
+            """
+            WITH expired AS (
+                SELECT id FROM chat_runs
+                WHERE status = 'running'
+                    AND (lease_expires_at IS NULL OR lease_expires_at < clock_timestamp())
+                ORDER BY lease_expires_at NULLS FIRST FOR UPDATE SKIP LOCKED LIMIT %s
+            )
+            UPDATE chat_runs run SET status = 'queued', lease_owner = NULL,
+                lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL
+            FROM expired WHERE run.id = expired.id RETURNING run.id
+            """,
+            (limit,),
+        )
+        return [row[0] for row in await cursor.fetchall()]
+
+    async def heartbeat(self, run_id, lease_token, lease_seconds: float) -> bool:
+        async with self.pool.connection() as conn, conn.transaction():
+            cursor = await conn.execute(
+                """
+                UPDATE chat_runs SET heartbeat_at = clock_timestamp(),
+                    lease_expires_at = clock_timestamp() + make_interval(secs => %s)
+                WHERE id = %s AND status = 'running' AND lease_token = %s
+                    AND lease_expires_at > clock_timestamp()
+                RETURNING id
+                """,
+                (lease_seconds, run_id, lease_token),
+            )
+            return await cursor.fetchone() is not None
 
     async def cancelled(self, run_id):
         async with self.pool.connection() as conn:
             cursor = await conn.execute("SELECT cancel_requested FROM chat_runs WHERE id = %s", (run_id,))
             return (await cursor.fetchone())[0]
 
-    async def publish(self, run_id, attempt, frame):
+    async def publish(self, run_id, lease_token, frame):
         """使用独立连接记录进度，避免与 LangGraph 的数据库流水线共用连接。"""
         async with self.pool.connection() as conn, conn.transaction():
             cursor = await conn.execute(
-                "SELECT id FROM chat_runs WHERE id = %s AND attempts = %s AND status = 'running' FOR UPDATE",
-                (run_id, attempt),
+                """SELECT id FROM chat_runs WHERE id = %s AND lease_token = %s
+                    AND status = 'running' AND lease_expires_at > clock_timestamp() FOR UPDATE""",
+                (run_id, lease_token),
             )
-            if await cursor.fetchone():
-                await self.append(conn, run_id, frame)
+            if not await cursor.fetchone():
+                raise LeaseLost(f"任务 {run_id} 的发布租约已失效。")
+            await self.append(conn, run_id, frame)
 
     @staticmethod
     async def append(conn, run_id, frame):
         await conn.execute("INSERT INTO chat_run_events(run_id, payload) VALUES (%s, %s)", (run_id, Jsonb(frame)))
 
-    async def finish(self, conn, run_id, frame, tokens=()):
+    async def finish(self, conn, run_id, lease_token, frame, tokens=()):
         async with conn.transaction():
             cursor = await conn.execute(
                 "SELECT cancel_requested, GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() - created_at)) * 1000)::bigint "
-                "FROM chat_runs WHERE id = %s FOR UPDATE", (run_id,),
+                "FROM chat_runs WHERE id = %s AND lease_token = %s AND status = 'running' "
+                "AND lease_expires_at > clock_timestamp() FOR UPDATE", (run_id, lease_token),
             )
-            cancelled, elapsed_ms = await cursor.fetchone()
+            row = await cursor.fetchone()
+            if row is None:
+                raise LeaseLost(f"任务 {run_id} 的完成租约已失效。")
+            cancelled, elapsed_ms = row
             if cancelled:
                 frame = {"type": "error", "message": "已停止生成。", "retryable": False}
                 status, tokens = "cancelled", ()
@@ -194,4 +243,25 @@ class ChatRunStore:
             for token in tokens:
                 await self.append(conn, run_id, token)
             await self.append(conn, run_id, {**frame, "elapsed_ms": elapsed_ms})
-            await conn.execute("UPDATE chat_runs SET status = %s, finished_at = NOW() WHERE id = %s", (status, run_id))
+            await conn.execute(
+                """UPDATE chat_runs SET status = %s, finished_at = NOW(), lease_owner = NULL,
+                    lease_token = NULL, lease_expires_at = NULL, heartbeat_at = NULL WHERE id = %s""",
+                (status, run_id),
+            )
+
+    async def _finish_queued_cancellation(self, conn, run_id):
+        cursor = await conn.execute(
+            "SELECT GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() - created_at)) * 1000)::bigint "
+            "FROM chat_runs WHERE id = %s AND status = 'queued' FOR UPDATE",
+            (run_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return
+        await self.append(conn, run_id, {
+            "type": "error", "message": "已停止生成。", "retryable": False, "elapsed_ms": row[0],
+        })
+        await conn.execute(
+            "UPDATE chat_runs SET status = 'cancelled', finished_at = NOW() WHERE id = %s",
+            (run_id,),
+        )

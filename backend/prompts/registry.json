@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "prompts": {
+    "agent.system": {"active": "1.0.0", "versions": {"1.0.0": {"file": "agent.system/1.0.0.txt", "sha256": "91dd306af336523e84bebd59c26ad37625f85a0994fea2ae03ca16b7ef0e477e", "owner": "agent-platform", "change_reason": "建立核心助手系统提示词基线"}}},
+    "compound.review": {"active": "1.0.0", "versions": {"1.0.0": {"file": "compound.review/1.0.0.txt", "sha256": "cc64510aaa1c028227cf21ac5e616f6f09bf0b95a3652a0a2a17c0bb0a260ef3", "owner": "agent-platform", "change_reason": "建立复合任务补查决策基线"}}},
+    "compound.web_answer": {"active": "1.0.0", "versions": {"1.0.0": {"file": "compound.web_answer/1.0.0.txt", "sha256": "1ed4018e476f31a6d5706c5ad8b276e92c48c82abf71a885c99882781dc1babf", "owner": "answer-quality", "change_reason": "建立复合任务联网写作基线"}}},
+    "context.summary": {"active": "1.0.0", "versions": {"1.0.0": {"file": "context.summary/1.0.0.txt", "sha256": "506993ff616831d76e54e53a58137d90d3f3a83803e11cc878020c84a50dad4d", "owner": "agent-platform", "change_reason": "建立会话压缩提示词基线"}}},
+    "evidence.followup": {"active": "1.0.0", "versions": {"1.0.0": {"file": "evidence.followup/1.0.0.txt", "sha256": "8f6d724a0ba2575d6818a85b9598c0ae85b65be3e7f5b3fb80c6c62044bf5156", "owner": "answer-quality", "change_reason": "建立证据缺口补查基线"}}},
+    "evidence.review": {"active": "1.0.0", "versions": {"1.0.0": {"file": "evidence.review/1.0.0.txt", "sha256": "8f07b947cc00e3b06bd304ef68caf33955ec6a9d64657b757d0563131e01af9f", "owner": "answer-quality", "change_reason": "建立证据充分性复核基线"}}},
+    "intent.plan": {"active": "1.0.0", "versions": {"1.0.0": {"file": "intent.plan/1.0.0.txt", "sha256": "e97b9a52cb9126d38fe55619b0390c1b41899dcbf1fb97d5e6c1e26faad3e787", "owner": "agent-routing", "change_reason": "建立复合意图任务拆解基线"}}},
+    "intent.semantic": {"active": "1.0.0", "versions": {"1.0.0": {"file": "intent.semantic/1.0.0.txt", "sha256": "13b94a07e4b1846ca7ac411d15ffd5f82ea63b094e2b5470f8aab8a34d23bd72", "owner": "agent-routing", "change_reason": "建立语义意图识别基线"}}},
+    "mcp.approved_answer": {"active": "1.0.0", "versions": {"1.0.0": {"file": "mcp.approved_answer/1.0.0.txt", "sha256": "1aee625f259a9d39b6c3b2b8825e865dc74ab6c792a7d00eb5c78151134c2dfe", "owner": "agent-security", "change_reason": "建立审批后续答安全基线"}}},
+    "recommendation.extract": {"active": "1.0.0", "versions": {"1.0.0": {"file": "recommendation.extract/1.0.0.txt", "sha256": "4b8d21fa3a9330241d982bd4f2a1fed25378480186921cacf54d6d28b9709473", "owner": "answer-quality", "change_reason": "建立推荐证据提取基线"}}},
+    "weather.advice": {"active": "1.0.0", "versions": {"1.0.0": {"file": "weather.advice/1.0.0.txt", "sha256": "227069d0a69308e605078d3a0fa100610eda8d79908c8b33c0cef096c8f276ea", "owner": "answer-quality", "change_reason": "建立天气建议生成基线"}}},
+    "web.writing": {"active": "1.0.0", "versions": {"1.0.0": {"file": "web.writing/1.0.0.txt", "sha256": "086b25704b7b5073b621a12d56f81a0a59809b509fd6d148be15980d1c67033e", "owner": "answer-quality", "change_reason": "建立联网回答写作规则基线"}}}
+  }
+}

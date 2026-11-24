@@ -36,10 +36,20 @@ async def queue_metrics(pool):
     try:
         async with asyncio.timeout(2), pool.connection() as connection:
             cursor = await connection.execute("""
-                SELECT count(*), coalesce(extract(epoch FROM now() - min(created_at)), 0)
-                FROM chat_runs WHERE status = 'queued'
+                SELECT
+                    count(*) FILTER (WHERE status = 'queued'),
+                    coalesce(extract(epoch FROM now() - min(created_at) FILTER (WHERE status = 'queued')), 0),
+                    count(*) FILTER (WHERE status = 'running' AND lease_expires_at > clock_timestamp()),
+                    count(*) FILTER (WHERE status = 'running'
+                        AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp()))
+                FROM chat_runs WHERE status IN ('queued', 'running')
             """)
-            count, oldest = await cursor.fetchone()
+            count, oldest, active_leases, expired_leases = await cursor.fetchone()
     except Exception:
         return ""
-    return f"agent_chat_queue_depth {count}\nagent_chat_queue_oldest_seconds {max(0, oldest)}\n"
+    return (
+        f"agent_chat_queue_depth {count}\n"
+        f"agent_chat_queue_oldest_seconds {max(0, oldest)}\n"
+        f"agent_chat_active_leases {active_leases}\n"
+        f"agent_chat_expired_leases {expired_leases}\n"
+    )

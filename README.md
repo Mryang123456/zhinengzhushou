@@ -8,6 +8,10 @@
 
 项目按照 UI 层、Agent 编排层、工具层、知识层和集成层组织，完整的分层职责、运行流程及可维护 Mermaid 源图见 [架构说明](docs/architecture/architecture.md)。
 
+需要系统了解每一层、每个节点、典型请求流程、数据存储、安全治理和涉及知识点时，参阅 [Agent 项目详细说明书](docs/agent-project-manual.md)。
+
+此前讨论和排查中识别出的生产级升级项，统一维护在 [生产级升级台账](docs/roadmap/production-upgrade-backlog.md)，包含优先级、当前状态、验收标准、典型回归和推荐实施顺序。
+
 ## 可选 Java Service
 
 `java-service/` 提供独立的 Spring Boot 业务服务基础框架。目前仅包含健康检查、统一响应、异常处理、Trace ID 和 Python Agent 就绪探测，不接管认证、会话、数据库或前端请求，因此不会改变现有 React → FastAPI 链路。后续出现明确业务需求时，可逐步让 Java 承担用户、租户、权限和业务事务，Python 继续负责 LangGraph、RAG、MCP 与模型调用。启动和验证方法见 [Java Service 说明](java-service/README.md)。
@@ -340,7 +344,11 @@ START → agent → tools? → agent → END
 - `POST /chat/runs/{run_id}/cancel` 提交取消请求。后台执行器检查请求后停止当前工作流，已完成的外部操作保留其原有结果。
 - 刷新后的待审批卡片使用原任务 ID 发送确认。服务端核对任务归属、审批有效期和一次性令牌状态。
 
-worker 崩溃后，下一次取得会话锁的 worker 会读取持久化 Checkpoint，从待执行节点继续。接管期间跳过记忆写入和需要审批的 MCP 操作，降低外部副作用重复执行的风险。每个 API 进程默认运行两个 worker，可通过 `AGENT_RUN_WORKERS` 调整，连接池至少预留一个连接用于 HTTP 查询。生产部署使用现有的认证、Redis 和 PostgreSQL 配置。Windows 上本地验证异步 PostgreSQL 时，启动进程需要使用 `asyncio.SelectorEventLoop`。
+Worker 领取任务时会写入唯一租约令牌、租约所有者、心跳时间和过期时间；独立心跳连接持续续租。Worker 被强制终止或失去数据库连接后，独立后台 reaper 会将过期任务原子地退回队列，下一位取得会话锁的 Worker 从持久化 Checkpoint 接管。失租信号会中断正在等待的执行；取消状态查询设有两秒超时，避免阻塞失租处理。进度事件和最终结果都必须携带当前租约令牌且租约未过期，旧 Worker 恢复后会被 fencing 拒绝，不能覆盖新 Attempt 的结果。接管期间还会跳过记忆写入和需要审批的 MCP 操作，降低外部副作用重复执行的风险。
+
+原请求恢复时只比较客户端业务参数，沿用任务首次提交时保存的 Prompt Manifest；发布新 Prompt 版本不会导致相同请求 ID 的恢复冲突。问题、重试标记、记忆和 MCP 开关等业务参数发生变化时仍返回冲突。
+
+每个 API 进程默认运行两个 Worker，可通过 `AGENT_RUN_WORKERS` 调整。每个执行中的 Worker 会占用一条工作流连接和一条独立心跳连接，因此 `CHECKPOINT_POOL_MAX_SIZE` 应至少为 `2 × Worker 数 + 1`；服务会按池容量自动限制 Worker 数，并保留连接给 HTTP 查询和 reaper。租约参数可通过 `AGENT_RUN_LEASE_SECONDS`、`AGENT_RUN_HEARTBEAT_SECONDS`、`AGENT_RUN_REAPER_SECONDS` 调整。生产部署使用现有的认证、Redis 和 PostgreSQL 配置。Windows 上本地验证异步 PostgreSQL 时，启动进程需要使用 `asyncio.SelectorEventLoop`。
 
 启用会话持久化时，在项目根目录的 `.env.local` 设置 `CHECKPOINT_DATABASE_URL`，使用已建好的 PostgreSQL 库。Worker 使用会话级 advisory lock，数据库地址应指向直连端点或会话模式连接池；事务模式连接池无法保证同一锁的会话归属。按 API 进程数乘以 `CHECKPOINT_POOL_MAX_SIZE` 预估连接上限，并为迁移和其他服务留出连接。
 
@@ -394,6 +402,21 @@ python -m pip install -r backend/requirements-model-providers.txt
 ```
 
 模型调用接口保持一致，因此工具、MCP、记忆、规划和 SSE 均不需要修改。
+
+## Prompt Registry 与版本回滚
+
+系统 Prompt 不再只内嵌在 Python 文件中。版本化正文位于 `backend/prompts/<prompt_id>/<version>.txt`，元数据统一登记在 `backend/prompts/registry.json`，包含 `prompt_id`、版本、SHA-256、负责人和变更原因。应用加载时会校验文件 Hash，缺失、篡改或未登记的版本会直接拒绝使用。
+
+每次提交聊天 Run 时，后端会把本次使用的完整 Prompt Manifest 及其摘要写入任务载荷。后台 Worker、重试和断点恢复均从这份 Manifest 固定版本，不会因为 active 版本变化而静默漂移；日志中的 `prompt_manifest_selected` 和 `prompt_manifest_restored` 事件可按 Run 追踪版本。
+
+需要回滚时，在 `.env.local` 设置对应版本后重启实例，例如：
+
+```text
+PROMPT_VERSION_AGENT_SYSTEM=1.0.0
+PROMPT_VERSION_INTENT_SEMANTIC=1.0.0
+```
+
+变量名由 `prompt_id` 转为大写下划线。回滚目标必须已经登记且 Hash 校验通过。新增 Prompt 版本时保留旧文件、登记新版本及变更原因，并先运行 `python -m unittest backend.tests.test_prompt_registry`。
 
 天气使用 [Open-Meteo](https://open-meteo.com/en/docs)，网页搜索使用 [DDGS](https://pypi.org/project/ddgs/)。二者均需要本机能访问互联网。
 

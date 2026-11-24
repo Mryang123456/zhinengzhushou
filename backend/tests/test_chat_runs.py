@@ -86,6 +86,10 @@ class ChatRunTests(unittest.TestCase):
         self.assertEqual(calls[2], calls[3])
         self.assertEqual(calls[0][3], message_id)
         self.assertEqual(calls[2][3], attempt_id)
+        submitted_payload = calls[0][4]
+        self.assertTrue(submitted_payload["prompt_manifest_hash"])
+        self.assertGreaterEqual(len(submitted_payload["prompt_manifest"]), 10)
+        self.assertTrue(all(item.get("version") and item.get("hash") for item in submitted_payload["prompt_manifest"]))
 
     def test_approval_recovery_requires_owned_run_and_consumes_existing_token(self):
         run_id = uuid4()
