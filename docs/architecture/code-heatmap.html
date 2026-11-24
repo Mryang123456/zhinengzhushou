@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent 项目代码总热力图</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#f7f8fa;--fg:#172033;--muted:#667085;--card:#fff;--border:#e3e7ee;--h1:#e8f1ff;--h2:#bdd7ff;--h3:#7eb0f7;--h4:#397ed5;--h5:#164a91;--light:#fff;--dark:#172033}
+    @media(prefers-color-scheme:dark){:root{--bg:#0f1420;--fg:#eef3fc;--muted:#aeb8ca;--card:#171f2e;--border:#2b3649;--h1:#243a59;--h2:#28588d;--h3:#2f75bd;--h4:#4b92dc;--h5:#8bc2ff;--light:#0f1420;--dark:#eef3fc}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}.page{max-width:1280px;margin:0 auto;padding:28px}h1{margin:0;font-size:28px;font-weight:650}.sub{margin:4px 0 20px;color:var(--muted)}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:22px}.stat{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:15px 18px}.stat span{display:block;color:var(--muted)}.stat strong{display:block;margin:3px 0;font-size:27px;font-weight:650}.heatmap{display:grid;grid-template-columns:minmax(190px,1.6fr) repeat(4,minmax(120px,1fr));gap:5px;align-items:stretch}.head{color:var(--muted);font-weight:600;padding:9px 10px}.label{display:flex;align-items:center;background:var(--card);border:1px solid var(--border);border-radius:7px;padding:8px 11px;font-weight:600}.cell{display:flex;align-items:center;justify-content:center;border-radius:7px;min-height:37px;font-variant-numeric:tabular-nums;font-weight:650}.h1{background:var(--h1);color:var(--dark)}.h2{background:var(--h2);color:var(--dark)}.h3{background:var(--h3);color:var(--dark)}.h4{background:var(--h4);color:var(--light)}.h5{background:var(--h5);color:var(--light)}.legend{display:flex;align-items:center;gap:8px;margin-top:16px;color:var(--muted)}.scale{display:grid;grid-template-columns:repeat(5,38px);gap:3px}.scale i{display:block;height:12px;border-radius:3px}.note{margin:14px 0 0;color:var(--muted)}@media(max-width:760px){.page{padding:16px}.stats{grid-template-columns:1fr}.heatmap{grid-template-columns:minmax(150px,1.5fr) repeat(4,minmax(84px,1fr));min-width:720px}.scroll{overflow-x:auto}}
+  </style>
+</head>
+<body>
+<main class="page">
+  <h1>Agent 项目代码总热力图</h1>
+  <p class="sub">后端、前端、Java 服务、测试与评测体系的模块级汇总 · 2026-11-24</p>
+  <section class="stats" aria-label="总体统计">
+    <div class="stat"><span>有效代码行</span><strong>14,368</strong><span>排除依赖、构建产物和空行</span></div>
+    <div class="stat"><span>源码文件</span><strong>155</strong><span>Python · TypeScript · CSS · Java</span></div>
+    <div class="stat"><span>Python 占比</span><strong>78.6%</strong><span>11,299 行；Java 314 行</span></div>
+  </section>
+  <div class="scroll">
+    <section class="heatmap" aria-label="模块代码热力图">
+      <div class="head">模块</div><div class="head">综合热度</div><div class="head">代码规模</div><div class="head">分支密度</div><div class="head">文件数量</div>
+      <div class="label">后端测试 · 3,489 行</div><div class="cell h4">76</div><div class="cell h5">100</div><div class="cell h2">31</div><div class="cell h5">100</div>
+      <div class="label">后端 Agent · 2,344 行</div><div class="cell h4">70</div><div class="cell h4">67</div><div class="cell h4">62</div><div class="cell h5">100</div>
+      <div class="label">回答质量 · 1,037 行</div><div class="cell h3">57</div><div class="cell h2">30</div><div class="cell h5">100</div><div class="cell h3">50</div>
+      <div class="label">RAG 知识层 · 1,514 行</div><div class="cell h3">54</div><div class="cell h3">43</div><div class="cell h3">56</div><div class="cell h5">83</div>
+      <div class="label">意图识别 · 376 行</div><div class="cell h3">43</div><div class="cell h1">11</div><div class="cell h5">92</div><div class="cell h2">33</div>
+      <div class="label">评测体系 · 338 行</div><div class="cell h3">42</div><div class="cell h1">10</div><div class="cell h5">100</div><div class="cell h1">17</div>
+      <div class="label">前端业务 · 670 行</div><div class="cell h2">39</div><div class="cell h1">19</div><div class="cell h4">70</div><div class="cell h2">33</div>
+      <div class="label">前端组件 · 1,137 行</div><div class="cell h2">37</div><div class="cell h2">33</div><div class="cell h1">20</div><div class="cell h5">89</div>
+      <div class="label">后端 API · 896 行</div><div class="cell h2">35</div><div class="cell h2">26</div><div class="cell h3">47</div><div class="cell h2">39</div>
+      <div class="label">MCP 治理 · 319 行</div><div class="cell h2">34</div><div class="cell h1">9</div><div class="cell h4">71</div><div class="cell h2">28</div>
+      <div class="label">前端服务 · 308 行</div><div class="cell h2">31</div><div class="cell h1">9</div><div class="cell h4">69</div><div class="cell h1">17</div>
+      <div class="label">Skill 注册 · 66 行</div><div class="cell h2">28</div><div class="cell h1">2</div><div class="cell h4">72</div><div class="cell h1">11</div>
+      <div class="label">天气服务 · 172 行</div><div class="cell h2">27</div><div class="cell h1">5</div><div class="cell h4">64</div><div class="cell h1">17</div>
+      <div class="label">后端核心 · 257 行</div><div class="cell h2">25</div><div class="cell h1">7</div><div class="cell h3">48</div><div class="cell h2">28</div>
+      <div class="label">模型工厂 · 161 行</div><div class="cell h2">24</div><div class="cell h1">5</div><div class="cell h3">55</div><div class="cell h1">17</div>
+      <div class="label">前端 Hooks · 112 行</div><div class="cell h1">20</div><div class="cell h1">3</div><div class="cell h3">48</div><div class="cell h1">11</div>
+      <div class="label">Java 服务 · 314 行</div><div class="cell h1">19</div><div class="cell h1">9</div><div class="cell h1">7</div><div class="cell h4">78</div>
+      <div class="label">长期记忆 · 172 行</div><div class="cell h1">18</div><div class="cell h1">5</div><div class="cell h2">40</div><div class="cell h1">11</div>
+      <div class="label">Prompt Registry · 153 行</div><div class="cell h1">18</div><div class="cell h1">4</div><div class="cell h2">39</div><div class="cell h1">11</div>
+      <div class="label">前端测试 · 367 行</div><div class="cell h1">14</div><div class="cell h1">11</div><div class="cell h1">14</div><div class="cell h2">28</div>
+    </section>
+  </div>
+  <div class="legend"><span>低</span><div class="scale"><i class="h1"></i><i class="h2"></i><i class="h3"></i><i class="h4"></i><i class="h5"></i></div><span>高</span></div>
+  <p class="note">综合热度 = 50% 代码规模 + 35% 分支密度 + 15% 文件数量。它用于定位优先审查模块，不等同于缺陷率或标准圈复杂度。</p>
+</main>
+</body>
+</html>
